@@ -1,0 +1,60 @@
+# PnP-OVSS configuration
+# All values here are defaults — override any field as needed.
+# Run:  ./run.sh [infer|tune]   or   python3 main.py --config config.yaml
+
+# ── Model ──────────────────────────────────────────────────────────────────
+model:
+  name: "Salesforce/blip-itm-base-coco"
+  device: "auto"           # auto | mps | cuda | cpu
+
+# ── Patching strategy ──────────────────────────────────────────────────────
+patching:
+  type: "regular"          # regular | superpixel
+
+  superpixel:
+    n_segments: 576        # target number of superpixels (SLIC may produce fewer)
+    compactness: 10.0      # SLIC compactness — higher = more square-shaped segments
+    sigma: 1.0             # SLIC Gaussian pre-smoothing sigma
+
+# ── Core pipeline ──────────────────────────────────────────────────────────
+pipeline:
+  layer: 9                 # cross-attention layer (0-based; paper best for BLIP: 7)
+  head: 7                  # attention head      (0-based; paper best for BLIP: 9)
+  dropout_rounds: 3        # Salience DropOut iterations after the initial pass
+  patches_per_drop: 50     # segments removed per dropout round (paper: TOP-10)
+
+# ── Post-processing ────────────────────────────────────────────────────────
+postprocess:
+  threshold: 0.15          # salience binarisation threshold T (paper: 0.15)
+  gaussian_sigma: 0.05     # Gaussian blur σ as fraction of spatial map side
+  use_dense_crf: true      # apply Dense CRF after Gaussian blur (requires pydensecrf)
+
+# ── Output ─────────────────────────────────────────────────────────────────
+output:
+  dir: "results"
+  save_iterations: true    # save per-pass salience visualisations to output/iterations/
+
+# ── Dataset (for evaluate.py) ─────────────────────────────────────────────
+dataset:
+  name: "voc"            # voc | folder
+  root: "data/voc"       # torchvision downloads to root/VOCdevkit/VOC2012/
+  split: "val"           # train | val | trainval
+  download: true
+  max_images: 100        # null for all 1449 val images
+  min_pixels: null        # ignore classes with fewer GT pixels than this
+  classes: null          # null = all 20 VOC classes; or e.g. ["cat","dog","bird"]
+  seed: 42
+
+  # ── Folder dataset layout (used when name: folder) ───────────────────────
+  # data/folder/{class_name}/{image_id}.jpg
+  # data/folder/{class_name}/{image_id}_mask.png   ← optional binary mask
+
+# ── CLIP reward (for hyperparameter tuning, §3.4) ─────────────────────────
+clip:
+  model: "openai/clip-vit-large-patch14-336"   # paper: CLIP ViT-L/14 @ 336px
+
+# ── Hyperparameter tuning ──────────────────────────────────────────────────
+tuning:
+  out_dir: "experiments"
+  use_crf: true
+  max_images: 50     # images used for CLIP reward (keep small; 20-50 is enough)

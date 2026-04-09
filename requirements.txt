@@ -1,0 +1,29 @@
+# PnP-OVSS — Python dependencies
+# Install: pip install -r requirements.txt
+
+# Core deep learning
+torch>=2.1.0          # MPS support for Apple Silicon
+torchvision>=0.16.0
+
+# Vision-Language Model
+transformers>=4.36.0
+
+# Image processing
+Pillow>=10.0.0
+scipy>=1.11.0         # Gaussian blur (scipy.ndimage.gaussian_filter)
+scikit-image>=0.21.0  # optional utilities
+
+# Visualisation & logging
+matplotlib>=3.7.0
+numpy>=1.24.0
+tqdm>=4.66.0
+
+# ---- Optional: Dense CRF post-processing -----------------------------------
+# pydensecrf requires a C++ build environment.
+# On macOS (Apple Silicon): brew install cmake, then use GitHub version (PyPI version has Cython compilation issues on newer systems)
+# If unavailable, Dense CRF is silently skipped (Gaussian blur is used).
+git+https://github.com/lucasb-eyer/pydensecrf.git  # GitHub version works on modern macOS
+
+# ---- Optional: Jupyter support ---------------------------------------------
+# ipykernel
+# ipywidgets
