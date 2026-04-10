@@ -18,8 +18,8 @@ patching:
 
 # ── Core pipeline ──────────────────────────────────────────────────────────
 pipeline:
-  layer: 9                 # cross-attention layer (0-based; paper best for BLIP: 7)
-  head: 7                  # attention head      (0-based; paper best for BLIP: 9)
+  layer: 3                 # cross-attention layer (0-based; paper best for BLIP: 7)
+  head: 0                  # attention head      (0-based; paper best for BLIP: 9)
   dropout_rounds: 3        # Salience DropOut iterations after the initial pass
   patches_per_drop: 50     # segments removed per dropout round (paper: TOP-10)
 
