@@ -67,6 +67,7 @@ class BLIPWrapper:
     """
 
     DEFAULT_MODEL = "Salesforce/blip-itm-base-coco"
+    LARGE_MODEL   = "Salesforce/blip-itm-large-coco"
 
     def __init__(
         self,

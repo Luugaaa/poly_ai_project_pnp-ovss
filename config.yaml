@@ -4,7 +4,8 @@
 
 # ── Model ──────────────────────────────────────────────────────────────────
 model:
-  name: "Salesforce/blip-itm-base-coco"
+  name: "Salesforce/blip-itm-base-coco"   # base model (12 layers, 8 heads)
+  # name: "Salesforce/blip-itm-large-coco"  # large model — higher GPU memory required
   device: "auto"           # auto | mps | cuda | cpu
 
 # ── Patching strategy ──────────────────────────────────────────────────────
