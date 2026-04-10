@@ -152,6 +152,7 @@ def main() -> None:
     results = []
     _overview_saved = False
     total_possible_reward = len(samples)   # one point per (image, class) pair
+    save_overlay_ids = set(list(image_groups.keys())[:8])
 
     for layer_idx in range(num_layers):
         for head_idx in range(num_heads):
@@ -233,8 +234,8 @@ def main() -> None:
                         )
                         total_reward += sum(rewards.values())
 
-                    # Save mask overlays for first image only (for inspection)
-                    if iid == next(iter(image_groups)):
+                    # Save mask overlays for first 8 images (for inspection)
+                    if iid in save_overlay_ids:
                         for cls_name, mask in class_masks.items():
                             out_png = masks_dir / f"{tag}_{cls_name}.png"
                             save_mask_overlay(mask, image, str(out_png))
