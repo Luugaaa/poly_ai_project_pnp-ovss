@@ -14,9 +14,16 @@ DEFAULTS: dict[str, Any] = {
     "model": {
         "name": "Salesforce/blip-itm-base-coco",
         "device": "auto",
+        "image_size": 336,
     },
     "patching": {
         "type": "regular",
+        "regular": {
+            "grid_size": 21,
+        },
+        "regular_free": {
+            "grid_size": 21,
+        },
         "superpixel": {
             "n_segments": 100,
             "compactness": 10.0,
@@ -28,10 +35,16 @@ DEFAULTS: dict[str, Any] = {
         "head": 9,
         "dropout_rounds": 3,
         "patches_per_drop": 10,
+        "use_full_ensemble": False,
+        "class_filtering": {
+            "mode": "gt_present",   # gt_present | clip_topk
+            "top_k": 5,
+        },
     },
     "postprocess": {
         "threshold": 0.15,
         "gaussian_sigma": 0.05,
+        "use_blur": False,
         "use_dense_crf": True,
     },
     "output": {
@@ -89,6 +102,7 @@ def make_run_slug(class_name: str, cfg: dict[str, Any]) -> str:
     {class}_L{layer}_H{head}_{patch_tag}_dr{rounds}_pd{per_drop}_sig{sigma}[_crf]
 
     For superpixels, patch_tag is ``sup{n_segments}``.
+    For regular-free patches it is ``regf{grid_size}``.
     For regular patches it is ``reg``.
 
     Examples
@@ -103,6 +117,8 @@ def make_run_slug(class_name: str, cfg: dict[str, Any]) -> str:
 
     if pat["type"] == "superpixel":
         patch_tag = f"sup{pat['superpixel']['n_segments']}"
+    elif pat["type"] == "regular_free":
+        patch_tag = f"regf{pat.get('regular_free', {}).get('grid_size', 21)}"
     else:
         patch_tag = "reg"
 

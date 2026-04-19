@@ -1,0 +1,2 @@
+image_id,class_name,iou,dice,pred_coverage_pct,gt_coverage_pct,elapsed_s,status
+elephant_elephant,elephant,n/a,n/a,24.82,-1,5.9,ok

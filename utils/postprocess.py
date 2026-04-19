@@ -1,3 +1,7 @@
+from __future__ import annotations
+import torch.nn.functional as F
+import torch
+
 """
 Post-processing pipeline (§3.3 of PnP-OVSS)
 =============================================
@@ -11,7 +15,6 @@ Steps:
   4. Dense CRF  (optional)
 """
 
-from __future__ import annotations
 
 import warnings
 
@@ -25,6 +28,7 @@ def postprocess(
     spatial_map: np.ndarray | torch.Tensor,
     original_image: Image.Image,
     gaussian_sigma: float = 0.05,
+    use_blur: bool = False,
     use_dense_crf: bool = True,
 ) -> np.ndarray:
     """
@@ -46,10 +50,11 @@ def postprocess(
 
     sal = _normalize(spatial_map.astype(np.float32))
 
-    # Gaussian blur relative to map resolution
-    short_side = min(sal.shape)
-    sigma_px   = max(gaussian_sigma * short_side, 0.5)
-    blurred    = _normalize(gaussian_filter(sal, sigma=sigma_px))
+    blurred = sal
+    if use_blur:
+        short_side = min(sal.shape)
+        sigma_px   = max(gaussian_sigma * short_side, 0.5)
+        blurred    = _normalize(gaussian_filter(sal, sigma=sigma_px))
 
     # Resize to original image resolution
     H, W = original_image.size[1], original_image.size[0]
@@ -70,23 +75,34 @@ def save_mask_overlay(
     mask: np.ndarray,
     original_image: Image.Image,
     save_path: str,
+    gt_mask: np.ndarray | None = None,
 ) -> None:
     """
     Save a 3-panel visualisation: original | salience heatmap | overlay.
+    Accepts masks at any resolution — upsamples to image size when needed.
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     import matplotlib.cm as cm
 
-    fig, axes = plt.subplots(1, 3, figsize=(13, 4))
+    W_img, H_img = original_image.size
+    if mask.shape != (H_img, W_img):
+        mask_pil = Image.fromarray((mask * 255).astype(np.uint8), mode="L")
+        mask = np.array(
+            mask_pil.resize((W_img, H_img), Image.BILINEAR), dtype=np.float32
+        ) / 255.0
+
+    n_panels = 4 if gt_mask is not None else 3
+    n_panels = 4 if gt_mask is not None else 3
+    fig, axes = plt.subplots(1, n_panels, figsize=(4.5 * n_panels, 4))
 
     axes[0].imshow(original_image)
     axes[0].set_title("Original", fontsize=11)
     axes[0].axis("off")
 
     axes[1].imshow(mask, cmap="jet", vmin=0, vmax=1)
-    axes[1].set_title("Salience Map", fontsize=11)
+    axes[1].set_title("Prediction Mask", fontsize=11)
     axes[1].axis("off")
 
     grey     = np.array(original_image.convert("L"), dtype=np.float32) / 255.0
@@ -96,6 +112,16 @@ def save_mask_overlay(
     axes[2].imshow(overlay)
     axes[2].set_title("Overlay", fontsize=11)
     axes[2].axis("off")
+    
+    if gt_mask is not None:
+        axes[3].imshow(gt_mask, cmap="gray", vmin=0, vmax=1)
+        axes[3].set_title("Ground Truth", fontsize=11)
+        axes[3].axis("off")
+    
+    if gt_mask is not None:
+        axes[3].imshow(gt_mask, cmap="gray", vmin=0, vmax=1)
+        axes[3].set_title("Ground Truth", fontsize=11)
+        axes[3].axis("off")
 
     plt.tight_layout()
     plt.savefig(save_path, dpi=120, bbox_inches="tight")
@@ -141,3 +167,111 @@ def _apply_dense_crf(prob_map: np.ndarray, image_rgb: np.ndarray) -> np.ndarray:
     Q       = d.inference(5)
     refined = np.argmax(Q, axis=0).reshape(H, W).astype(np.float32)
     return refined
+
+
+def postprocess_multiclass(
+    spatial_maps: dict[str, np.ndarray | torch.Tensor],
+    original_image: Image.Image,
+    threshold: float = 0.15,
+    gaussian_sigma: float = 0.05,
+    use_blur: bool = False,
+    use_dense_crf: bool = True,
+) -> dict[str, np.ndarray]:
+    """
+    Processes all classes simultaneously, matching the paper's logic of adding a background
+    channel, doing a joint softmax/CRF, and extracting the final argmax.
+    """
+    H, W = original_image.size[1], original_image.size[0]
+    class_names = list(spatial_maps.keys())
+    num_classes = len(class_names)
+    
+    if num_classes == 0:
+        return {}
+
+    # 1. Normalise, apply threshold, and resize each map.
+    H_feat, W_feat = None, None
+    processed_maps = []
+    
+    for cls in class_names:
+        smap = spatial_maps[cls]
+        if isinstance(smap, torch.Tensor):
+            smap = smap.cpu().float().numpy()
+        H_feat, W_feat = smap.shape
+        
+        raw_smap = smap.astype(np.float32)
+        # Min-max normalise feature-level map to build the boolean threshold mask
+        norm_smap = _normalize(raw_smap)
+        mask = (norm_smap >= threshold).astype(np.float32)
+        
+        # Mask the *raw* prob map, as done in the paper: Blip_final_pred = pred_map * thresholded_pred_map
+        smap = raw_smap * mask
+        
+        # Resize to original image resolution using bilinear interpolation
+        # Using torch for exact match to mode='bilinear', align_corners=True
+
+        smap_t = torch.from_numpy(smap).unsqueeze(0).unsqueeze(0) # [1, 1, H, W]
+        smap_resized_t = torch.nn.functional.interpolate(smap_t, size=(H, W), mode='bilinear', align_corners=True).squeeze()
+        smap_resized = smap_resized_t.numpy()
+        
+        # Min-max normalise again (Scale_0_1)
+        smap_resized = _normalize(smap_resized)
+        processed_maps.append(smap_resized)
+        
+    stack_preds = np.stack(processed_maps, axis=0) # [C, H, W]
+    
+    # 2. Add Background Channel
+    # The paper calculates background from the ensemble max map:
+    max_map = np.max(stack_preds, axis=0)
+    bg_map = (max_map == 0.0).astype(np.float32)
+    # The paper's logic concatenates background as the first channel
+    pred_w_bg = np.concatenate([bg_map[np.newaxis, ...], stack_preds], axis=0) # [C+1, H, W]
+    
+    # 3. Optional Gaussian blur (applied per channel)
+    if use_blur:
+        sigma_px = gaussian_sigma * max(H, W)
+        blurred_preds = []
+        for i in range(pred_w_bg.shape[0]):
+            b = gaussian_filter(pred_w_bg[i], sigma=sigma_px)
+            mn_val = b.min()
+            b = b - mn_val
+            mx_val = b.max()
+            if mx_val > 0:
+                b = b / mx_val
+            blurred_preds.append(b)
+        pred_w_bg = np.stack(blurred_preds, axis=0) # [C+1, H, W]
+    
+    # 4. Dense CRF
+    if use_dense_crf:
+        import pydensecrf.densecrf as dcrf
+        from pydensecrf.utils import unary_from_softmax
+        
+        # Softmax over the channels because we have raw [0,1] features per channel
+        # The paper applies softmax before unary
+        output_logits = torch.from_numpy(pred_w_bg)
+        output_probs = F.softmax(output_logits, dim=0).cpu().numpy()
+        
+        fg = output_probs.reshape(num_classes + 1, -1)
+        unary = unary_from_softmax(fg)
+        
+        U = np.ascontiguousarray(unary)
+        d = dcrf.DenseCRF2D(W, H, num_classes + 1)
+        d.setUnaryEnergy(U)
+        d.addPairwiseGaussian(sxy=3, compat=7)
+        d.addPairwiseBilateral(
+            sxy=50, srgb=5,
+            rgbim=np.ascontiguousarray(np.array(original_image), dtype=np.uint8),
+            compat=10,
+        )
+        
+        Q = d.inference(10)
+        argmax_idx = np.argmax(Q, axis=0).reshape(H, W)
+    else:
+        argmax_idx = np.argmax(pred_w_bg, axis=0)
+        
+    # 5. Extract boolean masks for each class
+    final_masks = {}
+    for i, cls in enumerate(class_names):
+        # i + 1 because index 0 is background
+        final_masks[cls] = (argmax_idx == (i + 1)).astype(np.float32)
+        
+    return final_masks

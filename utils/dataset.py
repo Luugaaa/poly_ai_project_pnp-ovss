@@ -73,6 +73,7 @@ class EvalSample:
     class_name: str
     image:      Image.Image             # RGB PIL image (original resolution)
     gt_mask:    Optional[np.ndarray]    # bool [H, W] — None if unavailable
+    gt_label_map: Optional[np.ndarray] = None  # uint8 [H, W] full semantic labels (VOC only)
     source:     str = ""                # "voc" | "folder"
 
 
@@ -155,6 +156,7 @@ class PascalVOCDataset:
                     class_name = cls_name,
                     image      = image,
                     gt_mask    = gt_mask,
+                    gt_label_map = mask_np,
                     source     = "voc",
                 )
 
@@ -237,6 +239,7 @@ class FolderDataset:
                 class_name = class_name,
                 image      = image,
                 gt_mask    = gt_mask,
+                gt_label_map = None,
                 source     = "folder",
             )
 

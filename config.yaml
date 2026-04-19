@@ -1,61 +1,66 @@
-# PnP-OVSS configuration
-# All values here are defaults — override any field as needed.
-# Run:  ./run.sh [infer|tune]   or   python3 main.py --config config.yaml
-
-# ── Model ──────────────────────────────────────────────────────────────────
-model:
-  name: "Salesforce/blip-itm-base-coco"   # base model (12 layers, 8 heads)
-  # name: "Salesforce/blip-itm-large-coco"  # large model — higher GPU memory required
-  device: "auto"           # auto | mps | cuda | cpu
-
-# ── Patching strategy ──────────────────────────────────────────────────────
-patching:
-  type: "regular"          # regular | superpixel
-
-  superpixel:
-    n_segments: 576        # target number of superpixels (SLIC may produce fewer)
-    compactness: 10.0      # SLIC compactness — higher = more square-shaped segments
-    sigma: 1.0             # SLIC Gaussian pre-smoothing sigma
-
-# ── Core pipeline ──────────────────────────────────────────────────────────
-pipeline:
-  layer: 3                 # cross-attention layer (0-based; paper best for BLIP: 7)
-  head: 0                  # attention head      (0-based; paper best for BLIP: 9)
-  dropout_rounds: 3        # Salience DropOut iterations after the initial pass
-  patches_per_drop: 50     # segments removed per dropout round (paper: TOP-10)
-
-# ── Post-processing ────────────────────────────────────────────────────────
-postprocess:
-  threshold: 0.15          # salience binarisation threshold T (paper: 0.15)
-  gaussian_sigma: 0.05     # Gaussian blur σ as fraction of spatial map side
-  use_dense_crf: true      # apply Dense CRF after Gaussian blur (requires pydensecrf)
-
-# ── Output ─────────────────────────────────────────────────────────────────
-output:
-  dir: "results"
-  save_iterations: true    # save per-pass salience visualisations to output/iterations/
-
-# ── Dataset (for evaluate.py) ─────────────────────────────────────────────
-dataset:
-  name: "voc"            # voc | folder
-  root: "data/voc"       # torchvision downloads to root/VOCdevkit/VOC2012/
-  split: "val"           # train | val | trainval
-  download: true
-  max_images: 100        # null for all 1449 val images
-  min_pixels: null        # ignore classes with fewer GT pixels than this
-  classes: null          # null = all 20 VOC classes; or e.g. ["cat","dog","bird"]
-  seed: 42
-
-  # ── Folder dataset layout (used when name: folder) ───────────────────────
-  # data/folder/{class_name}/{image_id}.jpg
-  # data/folder/{class_name}/{image_id}_mask.png   ← optional binary mask
-
-# ── CLIP reward (for hyperparameter tuning, §3.4) ─────────────────────────
 clip:
-  model: "openai/clip-vit-large-patch14-336"   # paper: CLIP ViT-L/14 @ 336px
-
-# ── Hyperparameter tuning ──────────────────────────────────────────────────
+  model: openai/clip-vit-large-patch14-336
+dataset:
+  classes: null
+  download: true
+  max_images: 100
+  min_pixels: null
+  name: voc
+  root: data/voc
+  seed: 42
+  split: val
+model:
+  device: auto
+  image_size: 336
+  name: Salesforce/blip-itm-large-flickr
+output:
+  dir: results
+  save_iterations: true
+patching:
+  regular:
+    grid_size: 21
+  superpixel:
+    compactness: 10.0
+    n_segments: 576
+    sigma: 1.0
+  type: regular
+pipeline:
+  dropout_rounds: 3
+  head: 7
+  layer: 6
+  patches_per_drop: 10
+  use_full_ensemble: false
+postprocess:
+  gaussian_sigma: 0.05
+  threshold: 0.15
+  use_blur: false
+  use_dense_crf: true
+tune_pipeline:
+  blip_batch_size: 4
+  dropout_rounds_max: 6
+  mask_threshold: 0.25
+  max_images: 50
+  out_dir: experiments/hp_tuning
+  patches_per_drop:
+  - 5
+  - 10
+  - 25
+  - 35
+  - 50
+  regular:
+    grid_sizes:
+    - 8
+    - 12
+    - 24
+  superpixel:
+    compactness: 10.0
+    n_segments:
+    - 64
+    - 144
+    - 576
+    sigma: 1.0
+  vision_batch_size: 16
 tuning:
-  out_dir: "experiments"
-  use_crf: true
-  max_images: 50     # images used for CLIP reward (keep small; 20-50 is enough)
+  blip_batch_size: 4
+  max_images: 50
+  out_dir: experiments

@@ -20,7 +20,7 @@ instructs: they carry no semantic class information.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Union
+from typing import Dict, List, Union
 
 from PIL import Image
 from transformers import BlipProcessor
@@ -49,59 +49,42 @@ def get_class_from_path(image_path: Union[str, Path]) -> str:
     return Path(image_path).parent.name
 
 
-def format_prompt(class_name: str) -> str:
-    """Return the VLM text prompt for the given class name."""
-    return f"{PROMPT_PREFIX} {class_name}"
-
+def format_prompt(classes: List[str] | str) -> str:
+    """Return the VLM text prompt for the given class names concatenated."""
+    if isinstance(classes, str):
+        classes = [classes]
+    return f"{PROMPT_PREFIX} " + " ".join(classes)
 
 def get_class_token_indices(
     processor: BlipProcessor,
     prompt: str,
-    class_name: str,  # kept for clarity / future validation
-) -> List[int]:
+    classes: List[str] | str,
+) -> Dict[str, List[int]]:
     """
     Tokenise ``prompt`` and return the token position indices that correspond
-    to the class name, skipping ``"A picture of"``.
+    to the class names, skipping ``"A picture of"``.
 
-    The returned indices are positions in the full ``input_ids`` tensor
-    (including the leading ``[CLS]`` at position 0).
-
-    Strategy
-    --------
-    1. Encode the full prompt with special tokens → full token sequence.
-    2. Encode ``PROMPT_PREFIX`` without special tokens → prefix length.
-    3. Class tokens start at  ``1 + prefix_len``  (1 for ``[CLS]``).
-    4. Class tokens end before ``[SEP]`` (last token).
-
-    Parameters
-    ----------
-    processor  : BlipProcessor — provides the tokeniser.
-    prompt     : str           — e.g. "A picture of elephant"
-    class_name : str           — e.g. "elephant"  (for documentation only)
-
-    Returns
-    -------
-    List[int]  — indices into the ``input_ids`` sequence.
+    Returns a dictionary mapping each class name to a list of its token indices.
     """
+    if isinstance(classes, str):
+        classes = [classes]
+
     tokenizer = processor.tokenizer
-
-    full_ids: List[int] = tokenizer.encode(prompt, add_special_tokens=True)
-    prefix_ids: List[int] = tokenizer.encode(PROMPT_PREFIX, add_special_tokens=False)
-
-    prefix_len = len(prefix_ids)
-    # Position 0 = [CLS], positions 1..prefix_len = prefix tokens,
-    # positions prefix_len+1 .. len-2 = class tokens,
-    # position len-1 = [SEP]
-    class_start = 1 + prefix_len
-    class_end = len(full_ids) - 1  # exclusive
-
-    indices = list(range(class_start, class_end))
-
-    if not indices:
-        # Fallback: use all non-special tokens
-        indices = list(range(1, len(full_ids) - 1))
-
-    return indices
+    
+    # We expect [CLS] a picture of [class1_tokens] [class2_tokens] ... [SEP]
+    prefix_ids = tokenizer.encode(PROMPT_PREFIX, add_special_tokens=False)
+    start_idx = 1 + len(prefix_ids)
+    
+    class_indices = {}
+    curr_idx = start_idx
+    for cls in classes:
+        # Avoid special tokens for individual class words as they are in the middle of a string
+        cls_ids = tokenizer(cls, add_special_tokens=False).input_ids
+        num_tokens = len(cls_ids)
+        class_indices[cls] = list(range(curr_idx, curr_idx + num_tokens))
+        curr_idx += num_tokens
+        
+    return class_indices
 
 
 def load_image(image_path: Union[str, Path]) -> Image.Image:

@@ -48,9 +48,9 @@ def compute_gradcam_salience(
     class_token_indices: List[int],
 ) -> torch.Tensor:
     """
-    Compute the flat GradCAM salience vector M̃^(k) for one class.
+    Compute the flat GradCAM salience vector M_tilde^(k) for one class.
 
-        M̃^(k) = ReLU( ∂L_ITM/∂M^(k) )  ⊗  M^(k)       (equation 1)
+        M_tilde^(k) = mean_over_tokens( ReLU( ∂L_ITM/∂M ) * M )
 
     Zeroing of dropped patches is NOT done here — the PatchStrategy handles
     it at the pixel level (before the forward pass), so the attention over
@@ -67,6 +67,13 @@ def compute_gradcam_salience(
     -------
     salience : Tensor [P*P]
     """
-    M = extract_class_attention(attn,      head_idx, class_token_indices)
-    G = extract_class_attention(attn_grad, head_idx, class_token_indices)
-    return torch.relu(G) * M   # [P*P]
+    head_attn = attn[0, head_idx] # [text_len, img_len]
+    head_grad = attn_grad[0, head_idx] # [text_len, img_len]
+    
+    # Calculate token-level salience: relu(grad) * attn
+    token_salience = torch.relu(head_grad[class_token_indices]) * head_attn[class_token_indices] # [num_class_tokens, img_len]
+    
+    # Average across the tokens that make up the class name
+    class_salience = token_salience.mean(dim=0) # [img_len]
+    
+    return class_salience[1:] # [P*P] — drop image CLS

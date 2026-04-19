@@ -73,8 +73,10 @@ class BLIPWrapper:
         self,
         model_name: str = DEFAULT_MODEL,
         device: Optional[torch.device] = None,
+        input_size: Optional[int] = None,
     ) -> None:
         self.device = device if device is not None else get_device()
+        self.input_size = input_size
         print(f"[BLIPWrapper] Loading '{model_name}' on device '{self.device}' …")
         self.processor: BlipProcessor = BlipProcessor.from_pretrained(model_name)
         self.model: BlipForImageTextRetrieval = (
@@ -106,7 +108,7 @@ class BLIPWrapper:
     @property
     def image_size(self) -> int:
         """Expected square input image size in pixels (typically 384)."""
-        return self.model.vision_model.config.image_size
+        return self.input_size if self.input_size is not None else self.model.vision_model.config.image_size
 
     @property
     def num_patches_per_side(self) -> int:
@@ -124,13 +126,44 @@ class BLIPWrapper:
         Returns a dict with keys ``pixel_values``, ``input_ids``,
         ``attention_mask``.
         """
-        inputs = self.processor(
-            images=image,
-            text=text,
+        kwargs = {
+            "images": image,
+            "text": text,
+            "return_tensors": "pt",
+            "padding": True,
+        }
+        if self.input_size is not None:
+            kwargs["size"] = {"height": self.input_size, "width": self.input_size}
+        inputs = self.processor(**kwargs)
+        return {k: v.to(self.device) for k, v in inputs.items()}
+
+    def preprocess_image(self, image: Image.Image) -> torch.Tensor:
+        """
+        Preprocess image only → ``pixel_values`` [1, 3, H, W].
+
+        Use this to cache the image tensor when the same image is paired with
+        multiple text prompts (avoids redundant vision preprocessing).
+        """
+        kwargs = {"images": image, "return_tensors": "pt"}
+        if self.input_size is not None:
+            kwargs["size"] = {"height": self.input_size, "width": self.input_size}
+        out = self.processor(**kwargs)
+        return out["pixel_values"].to(self.device)
+
+    def preprocess_text(self, texts: list[str] | str) -> dict[str, torch.Tensor]:
+        """
+        Tokenize one or a list of prompts → ``{input_ids, attention_mask}``.
+
+        Uses right-padding so token positions are stable regardless of batch
+        size — class token indices computed on individual prompts remain valid.
+        """
+        out = self.processor.tokenizer(
+            texts,
             return_tensors="pt",
             padding=True,
+            truncation=True,
         )
-        return {k: v.to(self.device) for k, v in inputs.items()}
+        return {k: v.to(self.device) for k, v in out.items()}
 
     # ------------------------------------------------------------------
     # Forward pass with gradient capture
@@ -165,24 +198,77 @@ class BLIPWrapper:
             ``img_len = P*P + 1``  (patch tokens + image CLS token)
         Both are ``None`` if the hook did not fire (e.g. wrong layer index).
         """
+        # Vision encoder runs with no_grad — gradients only through text encoder.
+        image_embeds = self.encode_image_embeds(pixel_values)
+        return self.forward_with_gradcam_from_embeds(
+            image_embeds, input_ids, attention_mask, layer_idx
+        )
+
+    # ------------------------------------------------------------------
+    # Split vision / text-encoder forward
+    # ------------------------------------------------------------------
+
+    def encode_image_embeds(
+        self,
+        pixel_values: torch.Tensor,  # [B, 3, H, W]
+    ) -> torch.Tensor:
+        """
+        Run the vision encoder with no_grad and return image embeddings.
+
+        Calling this separately avoids storing ViT activations for backward,
+        which is the dominant memory and compute cost in a full forward pass.
+
+        Returns
+        -------
+        Tensor [B, img_len, D]  — detached, on device.
+        """
+        with torch.no_grad():
+            vision_out = self.model.vision_model(
+                pixel_values=pixel_values,
+                interpolate_pos_encoding=True,
+                return_dict=True,
+            )
+        return vision_out.last_hidden_state  # [B, img_len, D]
+
+    def forward_with_gradcam_from_embeds(
+        self,
+        image_embeds: torch.Tensor,    # [B, img_len, D]  — pre-computed, no grad
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        layer_idx: int,
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Like ``forward_with_gradcam`` but takes pre-computed image embeddings.
+
+        Gradients flow only through the text encoder and ITM head — the vision
+        encoder is never called.  This is ~2-3× faster because:
+          * ViT activations (large) are never stored for backward.
+          * ViT backward pass is skipped entirely.
+
+        Use ``encode_image_embeds`` to produce ``image_embeds``, optionally
+        caching results when the same image is queried multiple times.
+
+        Parameters
+        ----------
+        image_embeds    : Tensor [B, img_len, D]  — from ``encode_image_embeds``.
+        input_ids       : Tensor [B, text_len]
+        attention_mask  : Tensor [B, text_len]
+        layer_idx       : int — cross-attention layer to probe.
+
+        Returns
+        -------
+        attn, grad : same contract as ``forward_with_gradcam``.
+        """
         captured: dict = {}
 
-        # ---- forward hook: capture attn_probs and register grad hook -------
         def _forward_hook(module, inp, output):
-            # BlipTextSelfAttention returns (context, attn_probs) when
-            # output_attentions=True.  attn_probs: [B, H, T_text, T_img]
             if not (isinstance(output, tuple) and len(output) >= 2):
                 return
             attn_probs: torch.Tensor = output[1]
-
-            # Primary: retain_grad so .grad is populated after backward
             if attn_probs.requires_grad:
                 attn_probs.retain_grad()
-
-            # Fallback: register a tensor hook to capture gradient explicitly
-            # (more reliable on some backends such as MPS)
             captured["attn"] = attn_probs
-            captured["grad"] = None  # will be filled by backward hook below
+            captured["grad"] = None
 
             def _grad_hook(g: torch.Tensor) -> None:
                 captured["grad"] = g.detach().clone()
@@ -190,29 +276,31 @@ class BLIPWrapper:
             if attn_probs.requires_grad:
                 attn_probs.register_hook(_grad_hook)
 
-        # Attach hook to the cross-attention self-attention sub-module
-        target = self.model.text_encoder.encoder.layer[layer_idx].crossattention.self
+        target = (
+            self.model.text_encoder.encoder.layer[layer_idx].crossattention.self
+        )
         hook_handle = target.register_forward_hook(_forward_hook)
 
-        # ---- forward + backward --------------------------------------------
         self.model.zero_grad()
 
+        image_attn_mask = torch.ones(
+            image_embeds.shape[:2], dtype=torch.long, device=self.device
+        )
+
         with torch.enable_grad():
-            outputs = self.model(
-                pixel_values=pixel_values,
+            text_out = self.model.text_encoder(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                use_itm_head=True,
+                encoder_hidden_states=image_embeds,
+                encoder_attention_mask=image_attn_mask,
                 output_attentions=True,
                 return_dict=True,
             )
-
-            # itm_score: [B, 2]; label 1 = "matching"
-            itm_logits: torch.Tensor = outputs.itm_score
-            labels = torch.ones(
-                itm_logits.shape[0], dtype=torch.long, device=self.device
+            itm_logits = self.model.itm_head(
+                text_out.last_hidden_state[:, 0, :]
             )
-            loss = F.cross_entropy(itm_logits, labels)
+            
+            loss = itm_logits[:, 1].sum()
             loss.backward()
 
         hook_handle.remove()
@@ -221,7 +309,6 @@ class BLIPWrapper:
         if attn is None:
             return None, None
 
-        # Prefer the backward-hook gradient (more reliable); fall back to .grad
         grad = captured.get("grad")
         if grad is None and attn.grad is not None:
             grad = attn.grad.detach().clone()

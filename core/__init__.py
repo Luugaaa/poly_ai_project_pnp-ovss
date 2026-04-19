@@ -3,6 +3,7 @@ from .salience_dropout import salience_dropout
 from .patch_strategy import (
     PatchStrategy,
     RegularPatchStrategy,
+    RegularFreePatchStrategy,
     SuperpixelPatchStrategy,
     build_strategy,
 )
@@ -14,6 +15,7 @@ __all__ = [
     "salience_dropout",
     "PatchStrategy",
     "RegularPatchStrategy",
+    "RegularFreePatchStrategy",
     "SuperpixelPatchStrategy",
     "build_strategy",
     "CLIPReward",

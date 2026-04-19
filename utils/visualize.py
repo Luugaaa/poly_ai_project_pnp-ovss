@@ -27,7 +27,7 @@ import matplotlib.patches as mpatches
 import numpy as np
 from PIL import Image
 
-from core.patch_strategy import PatchStrategy, RegularPatchStrategy
+from core.patch_strategy import PatchStrategy, RegularPatchStrategy, RegularFreePatchStrategy
 
 
 def save_iteration_viz(
@@ -118,7 +118,8 @@ def save_patch_overview(
     Called once at the start of evaluate / tune runs so the user can see
     exactly what the active patch strategy looks like.
 
-    For RegularPatchStrategy : draws the P×P grid over the model-input
+    For RegularPatchStrategy / RegularFreePatchStrategy : draws the grid over
+                                the model-input resolution image.
                                 resolution image, with patch count in the title.
     For SuperpixelPatchStrategy : draws segment boundaries (skimage find_boundaries)
                                    coloured by segment index, with the actual
@@ -145,26 +146,27 @@ def save_patch_overview(
     # ── Right: patch overlay ──────────────────────────────────────────────
     axes[1].imshow(img_resized)
 
-    if isinstance(strategy, RegularPatchStrategy):
-        P  = strategy._P
-        ps = strategy._ps
-        # Draw grid lines at patch boundaries
-        for i in range(1, P):
-            axes[1].axhline(i * ps - 0.5, color="yellow", linewidth=0.7, alpha=0.8)
-            axes[1].axvline(i * ps - 0.5, color="yellow", linewidth=0.7, alpha=0.8)
-        # Label a few patches with their flat index
-        for r in range(0, P, max(1, P // 6)):
-            for c in range(0, P, max(1, P // 6)):
-                cx = c * ps + ps // 2
-                cy = r * ps + ps // 2
+    if isinstance(strategy, (RegularPatchStrategy, RegularFreePatchStrategy)):
+        G = int(np.sqrt(strategy.num_segments))
+        bounds = strategy._bounds
+        scale = img_size / float(bounds[-1]) if bounds[-1] > 0 else 1.0
+        # Draw grid lines at segment boundaries.
+        for i in range(1, G):
+            b = bounds[i] * scale
+            axes[1].axhline(b - 0.5, color="yellow", linewidth=0.7, alpha=0.8)
+            axes[1].axvline(b - 0.5, color="yellow", linewidth=0.7, alpha=0.8)
+        # Label a subset of segment ids.
+        for r in range(0, G, max(1, G // 6)):
+            for c in range(0, G, max(1, G // 6)):
+                cx = ((bounds[c] + bounds[c + 1]) * 0.5) * scale
+                cy = ((bounds[r] + bounds[r + 1]) * 0.5) * scale
                 axes[1].text(
-                    cx, cy, str(r * P + c),
+                    cx, cy, str(r * G + c),
                     color="white", fontsize=5, ha="center", va="center",
                     fontweight="bold",
                 )
-        axes[1].set_title(
-            f"Regular patches — {P}×{P} = {P*P} segments", fontsize=10
-        )
+        kind = "Regular patches" if isinstance(strategy, RegularPatchStrategy) else "Regular-free patches"
+        axes[1].set_title(f"{kind} — {G}×{G} = {strategy.num_segments} segments", fontsize=10)
 
     else:
         # Superpixel strategy: draw boundaries using skimage
@@ -232,13 +234,17 @@ def _overlay_dropped(
 
 
 def _add_grid_lines(ax, strategy: PatchStrategy) -> None:
-    """Draw patch grid lines for RegularPatchStrategy only."""
-    if not isinstance(strategy, RegularPatchStrategy):
+    """Draw grid lines for regular grid strategies only."""
+    if not isinstance(strategy, (RegularPatchStrategy, RegularFreePatchStrategy)):
         return
-    P = strategy._P
-    for i in range(1, P):
-        ax.axhline(i - 0.5, color="white", linewidth=0.4, alpha=0.5)
-        ax.axvline(i - 0.5, color="white", linewidth=0.4, alpha=0.5)
+    arr_shape = strategy.drop_overlay(set()).shape
+    h, w = arr_shape[0], arr_shape[1]
+    bounds = strategy._bounds
+    scale_y = h / float(bounds[-1]) if bounds[-1] > 0 else 1.0
+    scale_x = w / float(bounds[-1]) if bounds[-1] > 0 else 1.0
+    for b in bounds[1:-1]:
+        ax.axhline(b * scale_y - 0.5, color="white", linewidth=0.4, alpha=0.5)
+        ax.axvline(b * scale_x - 0.5, color="white", linewidth=0.4, alpha=0.5)
 
 
 def __scores_to_tensor(scores: np.ndarray, strategy: PatchStrategy):

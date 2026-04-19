@@ -2,23 +2,26 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # PnP-OVSS launcher
 # Usage:
-#   ./run.sh                          # infer with config.yaml
-#   ./run.sh infer                    # same
-#   ./run.sh tune                     # grid search with config.yaml
+#   ./run.sh                          # eval with default config
+#   ./run.sh eval                     # same
+#   ./run.sh infer                    # run single inference flow
+#   ./run.sh tune                     # layer/head grid search
+#   ./run.sh tune_pipeline            # pipeline param search (dropout, patches, granularity)
 #   ./run.sh infer my_config.yaml     # custom config
 #   ./run.sh tune  my_config.yaml
-#   ./run.sh infer config.yaml --layer 5 --head 3   # extra CLI overrides
+#   ./run.sh tune_pipeline my_config.yaml
+#   ./run.sh eval config.yaml --max_images 50        # extra CLI overrides
 # ──────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 MODE="eval"
-CONFIG="config.yaml"
+CONFIG="config_regular_tune.yaml"
 
 # Parse positional args (mode and/or config path)
 for arg in "$@"; do
   case "$arg" in
-    infer|tune|eval) MODE="$arg" ;;
+    infer|tune|tune_pipeline|eval) MODE="$arg" ;;
     *.yaml|*.yml) CONFIG="$arg" ;;
   esac
 done
@@ -27,7 +30,7 @@ done
 EXTRA=()
 for arg in "$@"; do
   case "$arg" in
-    infer|tune|*.yaml|*.yml) ;;
+    infer|tune|tune_pipeline|eval|*.yaml|*.yml) ;;
     *) EXTRA+=("$arg") ;;
   esac
 done
@@ -37,7 +40,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # ── Pick python ───────────────────────────────────────────────────────────────
-PYTHON="${PYTHON:-python3}"
+PYTHON="${PYTHON:-.venv/bin/python}"
 
 echo "========================================"
 echo "  PnP-OVSS"
@@ -47,6 +50,12 @@ echo "  config : $CONFIG"
 echo "========================================"
 echo ""
 
+if [ $# -eq 0 ]; then
+  echo "Note: default mode is eval."
+  echo "Use './run.sh tune_pipeline <config.yaml>' to run tuning."
+  echo ""
+fi
+
 case "$MODE" in
   infer)
     "$PYTHON" main.py --config "$CONFIG" "${EXTRA[@]}"
@@ -54,11 +63,14 @@ case "$MODE" in
   tune)
     "$PYTHON" scripts/tune_hyperparams.py --config "$CONFIG" "${EXTRA[@]}"
     ;;
+  tune_pipeline)
+    "$PYTHON" scripts/tune_pipeline.py --config "$CONFIG" "${EXTRA[@]}"
+    ;;
   eval)
     "$PYTHON" scripts/evaluate.py --config "$CONFIG" "${EXTRA[@]}"
     ;;
   *)
-    echo "Unknown mode '$MODE'. Use 'infer', 'tune', or 'eval'." >&2
+    echo "Unknown mode '$MODE'. Use 'infer', 'tune', 'tune_pipeline', or 'eval'." >&2
     exit 1
     ;;
 esac

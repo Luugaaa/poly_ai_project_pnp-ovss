@@ -75,6 +75,78 @@ class CLIPReward:
         self._model.eval()
         print("[CLIPReward] Ready.")
 
+    # ── Batched embedding API (for fast tuning) ───────────────────────────────
+
+    def encode_images(
+        self,
+        images: List[Image.Image],
+        batch_size: int = 32,
+    ) -> torch.Tensor:
+        """
+        Encode a list of PIL images → L2-normalised feature vectors [N, D] on CPU.
+
+        Processes in sub-batches of ``batch_size`` to bound GPU memory.
+        Returning on CPU keeps results cheap to hold across many combos.
+        """
+        parts = []
+        for start in range(0, len(images), batch_size):
+            batch = images[start : start + batch_size]
+            pv    = self._processor(images=batch, return_tensors="pt")["pixel_values"]
+            pv    = pv.to(self.device)
+            with torch.no_grad():
+                vis_out = self._model.vision_model(pixel_values=pv)
+                feats   = self._model.visual_projection(vis_out.pooler_output)
+                feats   = feats / feats.norm(dim=-1, keepdim=True)
+            parts.append(feats.cpu())
+        return torch.cat(parts, dim=0)   # [N, D]
+
+    def precompute_text_embeddings(
+        self,
+        class_names: List[str],
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Tokenise and encode class prompts → dict of L2-normalised vectors on CPU.
+
+        Call once before the combo loop; pass the result to
+        ``compute_reward_from_embeds``.
+        """
+        texts   = [_PROMPT_TEMPLATE.format(c) for c in class_names]
+        tok     = self._processor(text=texts, return_tensors="pt", padding=True)
+        with torch.no_grad():
+            txt_out = self._model.text_model(
+                input_ids      = tok["input_ids"].to(self.device),
+                attention_mask = tok["attention_mask"].to(self.device),
+            )
+            feats = self._model.text_projection(txt_out.pooler_output)
+            feats = feats / feats.norm(dim=-1, keepdim=True)
+        return {c: feats[i].cpu() for i, c in enumerate(class_names)}
+
+    def compute_reward_from_embeds(
+        self,
+        masked_embed: torch.Tensor,               # [D] on CPU
+        black_embed:  torch.Tensor,               # [D] on CPU
+        class_name:   str,
+        all_classes:  List[str],
+        text_embeds:  Dict[str, torch.Tensor],    # class → [D] on CPU
+    ) -> int:
+        """
+        Binary reward using pre-computed embeddings — no model call needed.
+
+        Implements equations (6)–(7): softmax over K(I) classes, compare masked
+        vs. black for the target class.
+        """
+        logit_scale = self._model.logit_scale.exp().item()
+        class_text  = torch.stack([text_embeds[c] for c in all_classes])  # [K, D]
+
+        logits_masked = logit_scale * (masked_embed @ class_text.T)   # [K]
+        logits_black  = logit_scale * (black_embed  @ class_text.T)   # [K]
+
+        pr_masked = F.softmax(logits_masked, dim=0)
+        pr_black  = F.softmax(logits_black,  dim=0)
+
+        idx = all_classes.index(class_name)
+        return int(pr_masked[idx].item() > pr_black[idx].item())
+
     # ── Public API ────────────────────────────────────────────────────────────
 
     def compute_reward(
@@ -116,26 +188,46 @@ class CLIPReward:
         # Equation (6): reward += 1 if masked > black for class k
         return int(pr_masked.get(class_name, 0.0) > pr_black.get(class_name, 0.0))
 
+    def precompute_black(
+        self,
+        image:       Image.Image,
+        all_classes: List[str],
+    ) -> Dict[str, float]:
+        """
+        Pre-compute CLIP probabilities for the all-black image.
+
+        Pass the result as ``pr_black`` to ``compute_batch_reward`` to avoid
+        recomputing it on every (layer, head) combo — the black score never
+        changes between combos.
+        """
+        texts = [_PROMPT_TEMPLATE.format(c) for c in all_classes]
+        black = Image.new("RGB", image.size, (0, 0, 0))
+        return self._clip_probs(black, texts, all_classes)
+
     def compute_batch_reward(
         self,
         image:       Image.Image,
         masks:       Dict[str, np.ndarray],
         all_classes: List[str],
+        pr_black:    Optional[Dict[str, float]] = None,
     ) -> Dict[str, int]:
         """
         Compute rewards for all classes at once (single CLIP pass per image).
 
         Parameters
         ----------
-        masks : dict[class_name → mask ndarray [H, W]]
+        masks    : dict[class_name → mask ndarray [H, W]]
+        pr_black : pre-computed black-image probabilities from
+                   ``precompute_black``; computed on the fly if None.
 
         Returns
         -------
         dict[class_name → 0 or 1]
         """
-        texts     = [_PROMPT_TEMPLATE.format(c) for c in all_classes]
-        black     = Image.new("RGB", image.size, (0, 0, 0))
-        pr_black  = self._clip_probs(black, texts, all_classes)
+        texts = [_PROMPT_TEMPLATE.format(c) for c in all_classes]
+        if pr_black is None:
+            black    = Image.new("RGB", image.size, (0, 0, 0))
+            pr_black = self._clip_probs(black, texts, all_classes)
 
         rewards: Dict[str, int] = {}
         for cls, mask in masks.items():

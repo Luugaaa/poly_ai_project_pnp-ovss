@@ -1,0 +1,13 @@
+{
+    "patching": {
+        "type": "regular",
+        "regular": {
+            "grid_size": 12
+        },
+        "superpixel": {}
+    },
+    "pipeline": {
+        "dropout_rounds": 1,
+        "patches_per_drop": 5
+    }
+}

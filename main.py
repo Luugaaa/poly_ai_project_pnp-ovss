@@ -51,7 +51,7 @@ def parse_args() -> argparse.Namespace:
                    help="Cross-attention layer index (0-based).")
     p.add_argument("--head",      type=int, default=None,
                    help="Attention head index (0-based).")
-    p.add_argument("--patching",  choices=["regular", "superpixel"], default=None,
+    p.add_argument("--patching",  choices=["regular", "regular_free", "superpixel"], default=None,
                    help="Patching strategy.")
     p.add_argument("--threshold", type=float, default=None,
                    help="Salience binarisation threshold T.")

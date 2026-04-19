@@ -1,0 +1,45 @@
+# Paper-style reproduction baseline (non-oracle filtering)
+
+model:
+  name: "Salesforce/blip-itm-large-flickr"
+  device: "auto"
+  image_size: 336
+
+patching:
+  type: "regular"
+  regular:
+    grid_size: 21
+
+pipeline:
+  layer: 7
+  head: 9
+  dropout_rounds: 3
+  patches_per_drop: 10
+  use_full_ensemble: false
+  class_filtering:
+    mode: "clip_topk"
+    top_k: 5
+
+postprocess:
+  threshold: 0.15
+  gaussian_sigma: 0.05
+  use_blur: true
+  use_dense_crf: true
+
+output:
+  dir: "results"
+  save_iterations: true
+
+dataset:
+  name: "voc"
+  root: "data/voc"
+  split: "val"
+  download: true
+  max_images: null
+  min_pixels: null
+  classes: null
+  seed: 42
+
+tuning:
+  out_dir: "experiments"
+  max_images: 50

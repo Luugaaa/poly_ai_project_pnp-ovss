@@ -14,7 +14,7 @@ to a spatial map via  strategy.to_spatial(scores).
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional, Set
+from typing import Dict, List, Optional, Set
 
 import numpy as np
 import torch
@@ -32,14 +32,14 @@ def salience_dropout(
     attention_mask: torch.Tensor,
     layer_idx: int,
     head_idx: int,
-    class_token_indices: List[int],
+    class_token_indices: dict[str, list[int]],
     strategy: PatchStrategy,
     dropout_rounds: int = 3,
     patches_per_drop: int = 10,
     verbose: bool = True,
     viz_dir: Optional[Path] = None,
     original_image: Optional[Image.Image] = None,
-) -> torch.Tensor:
+) -> dict[str, torch.Tensor]:
     """
     Full Salience DropOut loop.
 
@@ -64,10 +64,11 @@ def salience_dropout(
     accumulated : Tensor [N]  — sum of per-segment GradCAM scores over all passes.
     """
     N = strategy.num_segments
-    accumulated = torch.zeros(N, device=wrapper.device)
+    accumulated = {c: torch.zeros(N, device=wrapper.device) for c in class_token_indices}
     remaining: Set[int] = set(range(N))
     dropped:   Set[int] = set()
     current_pv = pixel_values
+    # Paper-style loop: one initial pass + configured dropout rounds.
     total_passes = 1 + dropout_rounds
 
     for t in range(total_passes):
@@ -90,37 +91,28 @@ def salience_dropout(
                 )
             break
 
-        flat_scores = compute_gradcam_salience(
-            attn, attn_grad, head_idx, class_token_indices
-        )                                   # [P*P]
+        sum_scores = torch.zeros(N, device=wrapper.device)
+        class_seg_scores = {}
+        for c, t_idx in class_token_indices.items():
+            flat_scores = compute_gradcam_salience(
+                attn, attn_grad, head_idx, t_idx
+            )                                   # [P*P]
+            seg_scores = strategy.aggregate(flat_scores)  # [N]
+            for idx in dropped:
+                seg_scores[idx] = 0.0
+            class_seg_scores[c] = seg_scores
+            
+            # Match reference behavior where the first pass contributes twice.
+            weight = 2.0 if t == 0 else 1.0
+            accumulated[c] = accumulated[c] + (seg_scores * weight)
+            sum_scores = sum_scores + seg_scores
 
-        seg_scores = strategy.aggregate(flat_scores)  # [N]
-
-        # Explicitly zero dropped segments (robustness across backends)
-        for idx in dropped:
-            seg_scores[idx] = 0.0
-
-        accumulated = accumulated + seg_scores
-
-        # ── Iteration visualisation ───────────────────────────────────────
-        if viz_dir is not None and original_image is not None:
-            from utils.visualize import save_iteration_viz
-            save_iteration_viz(
-                t=t,
-                total_passes=total_passes,
-                current_scores=seg_scores.cpu().numpy(),
-                accumulated_scores=accumulated.cpu().numpy(),
-                dropped=dropped,
-                strategy=strategy,
-                original_image=original_image,
-                out_dir=viz_dir,
-            )
 
         # ── Dropout step (skip after final pass) ──────────────────────────
-        if t < dropout_rounds:
-            new_drops = strategy.top_k(seg_scores, remaining, k=patches_per_drop)
+        if t < (total_passes - 1):
+            new_drops = strategy.top_k(sum_scores, remaining, k=patches_per_drop)
             dropped   |= new_drops
             remaining -= new_drops
             current_pv = strategy.mask_segments(pixel_values, dropped)
 
-    return accumulated  # [N]
+    return accumulated  # dict[str, Tensor [N]]

@@ -1,0 +1,58 @@
+# Superpixel tuning on top of paper-style baseline
+
+model:
+  name: "Salesforce/blip-itm-large-flickr"
+  device: "auto"
+  image_size: 336
+
+patching:
+  type: "superpixel"
+  superpixel:
+    n_segments: 576
+    compactness: 10.0
+    sigma: 1.0
+
+pipeline:
+  layer: 7
+  head: 9
+  dropout_rounds: 3
+  patches_per_drop: 10
+  use_full_ensemble: false
+  class_filtering:
+    mode: "clip_topk"
+    top_k: 5
+
+postprocess:
+  threshold: 0.15
+  gaussian_sigma: 0.05
+  use_blur: true
+  use_dense_crf: true
+
+output:
+  dir: "results"
+  save_iterations: true
+
+dataset:
+  name: "voc"
+  root: "data/voc"
+  split: "val"
+  download: true
+  max_images: 50
+  min_pixels: null
+  classes: null
+  seed: 42
+
+tune_pipeline:
+  max_images: 50
+  out_dir: "experiments/hp_tuning"
+  threshold: 0.15
+  regular:
+    grid_sizes: [21]
+  superpixel:
+    n_segments: [144, 256, 400, 576]
+    compactness: 10.0
+    sigma: 1.0
+  patches_per_drop: [5, 10, 25, 35, 50]
+  dropout_rounds_max: 6
+  vision_batch_size: 16
+  blip_batch_size: 4

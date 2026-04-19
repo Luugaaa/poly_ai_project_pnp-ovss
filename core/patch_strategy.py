@@ -20,6 +20,11 @@ Two concrete strategies are provided:
 Both strategies share the same interface so they can be swapped without
 changing any other code.
 
+    RegularFreePatchStrategy
+        Uses a regular G×G grid built directly in pixel space at model-input
+        resolution. Segment boundaries are independent from the ViT token grid.
+        GradCAM token scores are mapped to these pixel-space cells via overlap.
+
 Interface
 ---------
   strategy.num_segments          → int
@@ -132,22 +137,57 @@ class PatchStrategy(ABC):
 
 class RegularPatchStrategy(PatchStrategy):
     """
-    Each of BLIP's internal P×P grid patches is treated as one segment.
-    Segment index = row * P + col  (flat, row-major).
+    Each of BLIP's internal P×P grid patches is treated as one segment,
+    or optionally grouped into a coarser G×G grid (grid_size < P).
+
+    With ``grid_size=G``, model patches are grouped into a coarser G×G grid.
+    If ``G`` does not divide ``P``, coarse cells use uneven patch spans
+    (difference at most one patch) so all P×P model patches are still covered.
+    ``grid_size=None`` or ``grid_size=P`` gives the native patch-level
+    resolution (default behaviour).
+
+    Segment index = row * G + col  (flat, row-major over the coarse grid).
     """
 
-    def __init__(self, num_patches_per_side: int, patch_size: int) -> None:
+    def __init__(
+        self,
+        num_patches_per_side: int,
+        patch_size: int,
+        grid_size: int | None = None,
+    ) -> None:
         self._P  = num_patches_per_side
         self._ps = patch_size
         self._img_size = num_patches_per_side * patch_size
+        G = grid_size if grid_size is not None else num_patches_per_side
+        if G <= 0:
+            raise ValueError(f"grid_size must be positive, got {G}")
+        if G > num_patches_per_side:
+            raise ValueError(
+                f"grid_size {G} must be <= num_patches_per_side {num_patches_per_side}"
+            )
+        self._G     = G
+        # Partition patch indices into G bins; supports non-divisible G.
+        # Boundaries are in patch coordinates in [0, P].
+        self._bounds = [
+            (i * num_patches_per_side) // G for i in range(G + 1)
+        ]
 
     @property
     def num_segments(self) -> int:
-        return self._P * self._P
+        return self._G * self._G
 
     def aggregate(self, flat_scores: torch.Tensor) -> torch.Tensor:
-        # Identity: each patch is already its own segment.
-        return flat_scores
+        """[P*P] → [G*G]  (average-pool model patches within each coarse cell)."""
+        if self._G == self._P:
+            return flat_scores   # native resolution — identity
+        arr = flat_scores.reshape(self._P, self._P)
+        pooled = []
+        for r in range(self._G):
+            r0, r1 = self._bounds[r], self._bounds[r + 1]
+            for c in range(self._G):
+                c0, c1 = self._bounds[c], self._bounds[c + 1]
+                pooled.append(arr[r0:r1, c0:c1].mean())
+        return torch.stack(pooled).flatten()   # [G*G]
 
     def top_k(self, scores: torch.Tensor, remaining: Set[int], k: int) -> Set[int]:
         return self._top_k_from_list(scores, list(remaining), k)
@@ -159,25 +199,128 @@ class RegularPatchStrategy(PatchStrategy):
     ) -> torch.Tensor:
         if not dropped:
             return pixel_values
-        P, ps = self._P, self._ps
+        G, ps = self._G, self._ps
         masked = pixel_values.clone()
         for flat_idx in dropped:
-            r = flat_idx // P
-            c = flat_idx % P
-            masked[:, :, r * ps : (r + 1) * ps, c * ps : (c + 1) * ps] = 0.0
+            r = flat_idx // G
+            c = flat_idx % G
+            r0, r1 = self._bounds[r] * ps, self._bounds[r + 1] * ps
+            c0, c1 = self._bounds[c] * ps, self._bounds[c + 1] * ps
+            masked[:, :, r0:r1, c0:c1] = 0.0
         return masked
 
     def to_spatial(self, scores: torch.Tensor) -> np.ndarray:
-        """[P*P] → [P, P] float32"""
-        return scores.cpu().float().numpy().reshape(self._P, self._P)
+        """[G*G] → [G, G] float32  (postprocess bilinearly upsamples to image size)."""
+        return scores.cpu().float().numpy().reshape(self._G, self._G)
 
     def drop_overlay(self, dropped: Set[int]) -> np.ndarray:
-        """[P, P] bool"""
-        P = self._P
-        overlay = np.zeros((P, P), dtype=bool)
+        """[G, G] bool"""
+        G = self._G
+        overlay = np.zeros((G, G), dtype=bool)
         for flat_idx in dropped:
-            overlay[flat_idx // P, flat_idx % P] = True
+            overlay[flat_idx // G, flat_idx % G] = True
         return overlay
+
+
+class RegularFreePatchStrategy(PatchStrategy):
+    """
+    Pixel-space regular grid strategy.
+
+    Segments are defined as a regular G×G partition over the model-input
+    image (img_size × img_size), independent from the ViT patch grid P×P.
+    Token-level GradCAM scores are aggregated per segment by area overlap.
+
+    Segment index = row * G + col  (flat, row-major over pixel-space grid).
+    """
+
+    def __init__(
+        self,
+        model_img_size: int,
+        model_patch_sz: int,
+        grid_size: int,
+        device: torch.device | None = None,
+    ) -> None:
+        if grid_size <= 0:
+            raise ValueError(f"grid_size must be positive, got {grid_size}")
+        if grid_size > model_img_size:
+            raise ValueError(
+                f"grid_size {grid_size} must be <= model_img_size {model_img_size}"
+            )
+
+        self._img_size = model_img_size
+        self._ps = model_patch_sz
+        self._P = model_img_size // model_patch_sz
+        self._G = grid_size
+        self._device = device
+        self._bounds = [(i * model_img_size) // grid_size for i in range(grid_size + 1)]
+
+        # Pixel-space label map [H, W] with flat segment ids in [0, G*G-1].
+        labels = np.zeros((model_img_size, model_img_size), dtype=np.int32)
+        for r in range(grid_size):
+            r0, r1 = self._bounds[r], self._bounds[r + 1]
+            for c in range(grid_size):
+                c0, c1 = self._bounds[c], self._bounds[c + 1]
+                labels[r0:r1, c0:c1] = r * grid_size + c
+        self._labels = labels
+
+        # Precompute patch-flat indices overlapping each segment.
+        row_idx, col_idx = np.mgrid[0:model_img_size, 0:model_img_size]
+        patch_flat = (row_idx // model_patch_sz) * self._P + (col_idx // model_patch_sz)
+        self._seg_patches: list[np.ndarray] = []
+        K = grid_size * grid_size
+        for seg in range(K):
+            seg_mask = labels == seg
+            self._seg_patches.append(patch_flat[seg_mask])
+
+    @property
+    def num_segments(self) -> int:
+        return self._G * self._G
+
+    def aggregate(self, flat_scores: torch.Tensor) -> torch.Tensor:
+        """[P*P] -> [G*G] by overlap-weighted mean in pixel space."""
+        scores_np = flat_scores.cpu().float().numpy()
+        result = np.zeros(self.num_segments, dtype=np.float32)
+        for seg in range(self.num_segments):
+            idxs = self._seg_patches[seg]
+            if len(idxs) > 0:
+                result[seg] = scores_np[idxs].mean()
+        dev = flat_scores.device if self._device is None else self._device
+        return torch.tensor(result, device=dev)
+
+    def top_k(self, scores: torch.Tensor, remaining: Set[int], k: int) -> Set[int]:
+        return self._top_k_from_list(scores, list(remaining), k)
+
+    def mask_segments(
+        self,
+        pixel_values: torch.Tensor,
+        dropped: Set[int],
+    ) -> torch.Tensor:
+        if not dropped:
+            return pixel_values
+        masked = pixel_values.clone()
+        for seg in dropped:
+            seg_mask = torch.from_numpy(self._labels == seg).to(pixel_values.device)
+            masked[0, :, seg_mask] = 0.0
+        return masked
+
+    def to_spatial(self, scores: torch.Tensor) -> np.ndarray:
+        """[G*G] -> [img_size, img_size] float32"""
+        scores_np = scores.cpu().float().numpy()
+        spatial = np.zeros((self._img_size, self._img_size), dtype=np.float32)
+        for seg in range(self.num_segments):
+            spatial[self._labels == seg] = scores_np[seg]
+        return spatial
+
+    def drop_overlay(self, dropped: Set[int]) -> np.ndarray:
+        """[img_size, img_size] bool"""
+        overlay = np.zeros((self._img_size, self._img_size), dtype=bool)
+        for seg in dropped:
+            overlay[self._labels == seg] = True
+        return overlay
+
+    def get_labels(self) -> np.ndarray:
+        """Return the [H, W] int32 segment label map."""
+        return self._labels
 
 
 # ── SLIC superpixels ────────────────────────────────────────────────────────
@@ -321,9 +464,21 @@ def build_strategy(cfg: dict, wrapper, image=None) -> PatchStrategy:
     kind = cfg.get("type", "regular")
 
     if kind == "regular":
+        grid_size = cfg.get("regular", {}).get("grid_size", None)
         return RegularPatchStrategy(
             num_patches_per_side=wrapper.num_patches_per_side,
             patch_size=wrapper.patch_size,
+            grid_size=grid_size,
+        )
+
+    if kind == "regular_free":
+        rf_cfg = cfg.get("regular_free", {})
+        grid_size = rf_cfg.get("grid_size", wrapper.num_patches_per_side)
+        return RegularFreePatchStrategy(
+            model_img_size=wrapper.image_size,
+            model_patch_sz=wrapper.patch_size,
+            grid_size=grid_size,
+            device=wrapper.device,
         )
 
     if kind == "superpixel":
@@ -340,4 +495,6 @@ def build_strategy(cfg: dict, wrapper, image=None) -> PatchStrategy:
             device=wrapper.device,
         )
 
-    raise ValueError(f"Unknown patching type '{kind}'. Choose 'regular' or 'superpixel'.")
+    raise ValueError(
+        f"Unknown patching type '{kind}'. Choose 'regular', 'regular_free' or 'superpixel'."
+    )

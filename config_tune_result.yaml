@@ -1,0 +1,38 @@
+# PnP-OVSS configuration - L7/H9 filtered-only (blur+crf)
+
+model:
+  name: "Salesforce/blip-itm-large-flickr"
+  device: "auto"
+  image_size: 336
+
+patching:
+  type: "regular"
+  regular:
+    grid_size: 12
+
+pipeline:
+  layer: 7
+  head: 9
+  dropout_rounds: 2
+  patches_per_drop: 5
+  use_full_ensemble: false
+
+postprocess:
+  threshold: 0.15
+  gaussian_sigma: 0.05
+  use_blur: true
+  use_dense_crf: true
+
+output:
+  dir: "results"
+  save_iterations: true
+
+dataset:
+  name: "voc"
+  root: "data/voc"
+  split: "val"
+  download: true
+  max_images: null
+  min_pixels: null
+  classes: null
+  seed: 42
