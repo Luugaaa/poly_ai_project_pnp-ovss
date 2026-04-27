@@ -43,7 +43,7 @@ ROOT   = Path(__file__).resolve().parent
 WORKER = str(ROOT / "scripts" / "run_macro_sweep.py")
 
 DATASETS     = ["voc", "chest_xray"]
-TRANSFORMERS = ["blip", "bridgetower", "albef"]
+TRANSFORMERS = ["blip", "bridgetower"]
 
 # Execution order: 1 → 3 → 2 → 4
 PHASE_ORDER = [1, 3, 2, 4]

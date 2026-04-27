@@ -17,6 +17,7 @@ from utils.postprocess import postprocess_multiclass, save_mask_overlay
 
 if TYPE_CHECKING:
     from models.blip_wrapper import BLIPWrapper
+    from models.bridgetower_wrapper import BridgeTowerWrapper
 
 
 PROMPT_CLASS_ALIAS = {
@@ -61,7 +62,7 @@ def _get_class_token_indices(processor, prompt: str, classes: list[str] | str) -
 class InferenceEngine:
     """Encapsulates prompting, GradCAM extraction, patching, and Salience DropOut."""
 
-    def __init__(self, cfg: dict, wrapper: Optional["BLIPWrapper"] = None) -> None:
+    def __init__(self, cfg: dict, wrapper: Optional[object] = None) -> None:
         # Deep-copy so each engine instance owns its config snapshot.
         # This prevents config mutations in the orchestrator (e.g. granularity
         # sweeps) from silently changing the behaviour of already-built engines.
@@ -71,15 +72,28 @@ class InferenceEngine:
         self.postprocess_cfg = self.cfg["postprocess"]
 
         if wrapper is None:
-            from models.blip_wrapper import BLIPWrapper
-
-            model_cfg = cfg["model"]
+            model_cfg = self.cfg["model"]
+            model_name = str(model_cfg.get("name", "")).lower()
             device = None if model_cfg["device"] == "auto" else torch.device(model_cfg["device"])
-            self.wrapper = BLIPWrapper(
-                model_name=model_cfg["name"],
-                device=device,
-                input_size=model_cfg.get("image_size"),
-            )
+
+            if "bridgetower" in model_name:
+                from models.bridgetower_wrapper import BridgeTowerWrapper
+
+                self.wrapper = BridgeTowerWrapper(
+                    model_name=model_cfg["name"],
+                    device=device,
+                    input_size=model_cfg.get("image_size"),
+                )
+            elif "blip" in model_name:
+                from models.blip_wrapper import BLIPWrapper
+
+                self.wrapper = BLIPWrapper(
+                    model_name=model_cfg["name"],
+                    device=device,
+                    input_size=model_cfg.get("image_size"),
+                )
+            else:
+                raise ValueError(f"Unsupported model name for inference engine: {model_cfg['name']}")
         else:
             self.wrapper = wrapper
 

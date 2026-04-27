@@ -3279,3 +3279,18 @@
 2026-04-27 14:37:27  INFO        ▶ phase3 (head-tuning) | voc | blip
 2026-04-27 14:46:39  INFO        ✓ phase3 (head-tuning) | voc | blip  (552.0s)
 2026-04-27 14:46:39  INFO        ▶ phase2 (patch-tuning) | voc | blip
+2026-04-27 15:21:52  INFO      ========================================================================
+2026-04-27 15:21:52  INFO        MACRO-MACRO RUNNER  START
+2026-04-27 15:21:52  INFO        datasets  : ['voc', 'chest_xray']
+2026-04-27 15:21:52  INFO        models    : ['blip', 'bridgetower']
+2026-04-27 15:21:52  INFO        phases    : [1, 2, 3, 4]  (exec order: [1, 3, 2, 4])
+2026-04-27 15:21:52  INFO        pairs     : 4
+2026-04-27 15:21:52  INFO        dry-run   : False
+2026-04-27 15:21:52  INFO        outputs   : outputs/{dataset}/{model}/phase_{N}/
+2026-04-27 15:21:52  INFO      ========================================================================
+2026-04-27 15:21:52  INFO      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-04-27 15:21:52  INFO        PAIR  dataset=voc           model=blip
+2026-04-27 15:21:52  INFO      ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2026-04-27 15:21:52  INFO        ▶ phase1 (baseline) | voc | blip
+2026-04-27 15:22:38  INFO        ✓ phase1 (baseline) | voc | blip  (45.9s)
+2026-04-27 15:22:38  INFO        ▶ phase3 (head-tuning) | voc | blip

@@ -20,7 +20,7 @@ macro_sweep:
 
   head_layer_tuning:
     run: true
-    metrics: ["dice"]
+    metrics: ["clip", "dice"]
 
   patch_settings_tuning:
     run: true

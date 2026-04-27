@@ -12,6 +12,7 @@ All runs enforce hard sample caps for deadline-safe execution.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import subprocess
 import sys
@@ -104,8 +105,6 @@ def _apply_macro_overrides(base_cfg: dict[str, Any], macro: dict[str, Any], samp
             cfg["model"]["name"] = "Salesforce/blip-itm-large-flickr"
     elif transformer == "bridgetower":
         cfg["model"]["name"] = "BridgeTower/bridgetower-large-itm-mlm-itc"
-    elif transformer == "albef":
-        cfg["model"]["name"] = "Salesforce/albef-base-itm"
     else:
         raise ValueError(f"Unsupported macro_sweep.transformer '{transformer}'.")
 
@@ -325,8 +324,9 @@ def _run_patch_tuning(
         image_groups = _group_samples(samples)
         # Hard-cap unique images to max_tune_samples regardless of dataset loader behaviour.
         image_groups = dict(list(image_groups.items())[:max_tune_samples])
+        base_run_cfg = copy.deepcopy(runner.cfg)
         # Enforce 336×336 input resolution for all strategies in this sweep.
-        runner.cfg.setdefault("model", {})["image_size"] = 336
+        base_run_cfg.setdefault("model", {})["image_size"] = 336
         print(f"Run dir : {writer.run_dir.relative_to(ROOT)}")
         print(f"Samples : {len(samples)} | Images (capped): {len(image_groups)}")
 
@@ -345,18 +345,20 @@ def _run_patch_tuning(
         # Uses regular_free (pixel-space G×G grid) to support sizes beyond the
         # ViT patch grid limit (num_patches_per_side ≈ 21 for BLIP 336px/16px).
         for grid_size in regular_grid_sizes:
-            runner.cfg.setdefault("patching", {})
-            runner.cfg["patching"]["type"] = "regular_free"
-            runner.cfg["patching"].setdefault("regular_free", {})["grid_size"] = grid_size
+            regular_cfg = copy.deepcopy(base_run_cfg)
+            regular_cfg.setdefault("patching", {})
+            regular_cfg["patching"]["type"] = "regular_free"
+            regular_cfg["patching"].setdefault("regular_free", {})["grid_size"] = grid_size
 
             for ppd in patches_per_drop_range:
-                runner.cfg.setdefault("pipeline", {})["patches_per_drop"] = int(ppd)
+                regular_cfg.setdefault("pipeline", {})["patches_per_drop"] = int(ppd)
 
                 for dr in dropout_iterations:
-                    runner.cfg["pipeline"]["dropout_rounds"] = int(dr)
+                    regular_cfg["pipeline"]["dropout_rounds"] = int(dr)
 
                     for thresh in threshold_range:
-                        runner.cfg.setdefault("postprocess", {})["threshold"] = float(thresh)
+                        combo_cfg = copy.deepcopy(regular_cfg)
+                        combo_cfg.setdefault("postprocess", {})["threshold"] = float(thresh)
 
                         t0 = time.perf_counter()
                         row: dict[str, Any] = {
@@ -368,7 +370,7 @@ def _run_patch_tuning(
                         }
 
                         try:
-                            inf = InferenceEngine(runner.cfg, wrapper=shared_wrapper)
+                            inf = InferenceEngine(combo_cfg, wrapper=shared_wrapper)
                             eval_rows, _ = _render_eval_rows(image_groups, inf, dataset_spec)
                             miou, mdice, cov = _compute_combo_metrics(eval_rows, dataset_spec)
                             elapsed = time.perf_counter() - t0
@@ -400,18 +402,20 @@ def _run_patch_tuning(
 
         # ── Superpixel strategy loop ──────────────────────────────────────────
         for n_segs in superpixel_segments:
-            runner.cfg.setdefault("patching", {})
-            runner.cfg["patching"]["type"] = "superpixel"
-            runner.cfg["patching"].setdefault("superpixel", {})["n_segments"] = n_segs
+            superpixel_cfg = copy.deepcopy(base_run_cfg)
+            superpixel_cfg.setdefault("patching", {})
+            superpixel_cfg["patching"]["type"] = "superpixel"
+            superpixel_cfg["patching"].setdefault("superpixel", {})["n_segments"] = n_segs
 
             for ppd in patches_per_drop_range:
-                runner.cfg.setdefault("pipeline", {})["patches_per_drop"] = int(ppd)
+                superpixel_cfg.setdefault("pipeline", {})["patches_per_drop"] = int(ppd)
 
                 for dr in dropout_iterations:
-                    runner.cfg["pipeline"]["dropout_rounds"] = int(dr)
+                    superpixel_cfg["pipeline"]["dropout_rounds"] = int(dr)
 
                     for thresh in threshold_range:
-                        runner.cfg.setdefault("postprocess", {})["threshold"] = float(thresh)
+                        combo_cfg = copy.deepcopy(superpixel_cfg)
+                        combo_cfg.setdefault("postprocess", {})["threshold"] = float(thresh)
 
                         t0 = time.perf_counter()
                         row: dict[str, Any] = {
@@ -423,7 +427,7 @@ def _run_patch_tuning(
                         }
 
                         try:
-                            inf = InferenceEngine(runner.cfg, wrapper=shared_wrapper)
+                            inf = InferenceEngine(combo_cfg, wrapper=shared_wrapper)
                             eval_rows, _ = _render_eval_rows(image_groups, inf, dataset_spec)
                             miou, mdice, cov = _compute_combo_metrics(eval_rows, dataset_spec)
                             elapsed = time.perf_counter() - t0
@@ -562,8 +566,8 @@ def main() -> None:
     if args.transformer:
         macro["transformer"] = args.transformer
 
-    max_eval_samples = int(args.max_eval_samples or macro.get("max_eval_samples", 200))
-    max_tune_samples = int(args.max_tune_samples or macro.get("max_tune_samples", 30))
+    max_eval_samples = min(int(args.max_eval_samples or macro.get("max_eval_samples", 200)), 200)
+    max_tune_samples = min(int(args.max_tune_samples or macro.get("max_tune_samples", 30)), 30)
 
     only = args.only_phase
     output_phase_dir = Path(args.output_phase_dir) if args.output_phase_dir else None
@@ -641,6 +645,15 @@ def main() -> None:
             out_path.write_text(json.dumps(best_pipeline, indent=2))
             print(_bold(f"Best pipeline saved → {out_path}  L={best_pipeline.get('layer')} H={best_pipeline.get('head')}"))
         _log_block("=== END: PHASE 3 — HEAD/LAYER TUNING ===")
+
+    if should_run_head and args.best_pipeline_out:
+        bp_path = Path(args.best_pipeline_out)
+        if bp_path.exists():
+            try:
+                best_pipeline = json.loads(bp_path.read_text())
+                print(_bold(f"Reloaded phase 3 best pipeline from {bp_path}: L={best_pipeline.get('layer')} H={best_pipeline.get('head')}"))
+            except Exception as exc:
+                print(f"Warning: could not reload {bp_path}: {exc}")
 
     # ── Phase 2: Patch/DropOut Tuning ─────────────────────────────────────────
     patch_cfg = macro.get("patch_settings_tuning", {})
