@@ -12,6 +12,7 @@ All runs enforce hard sample caps for deadline-safe execution.
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 import numpy as np
+import torch
 import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -152,6 +154,10 @@ def _render_eval_rows(
                     pred_mask = np.zeros((h, w), dtype=np.float32)
             rows.append((class_name, pred_mask, gt_mask))
 
+        # Release VRAM between images to prevent OOM during multi-combo sweeps.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
     return rows, masks_by_image
 
 
@@ -253,22 +259,35 @@ def _run_baseline_transfer(config_path: Path, slug: str, max_eval_samples: int) 
         writer.save_text("summary.txt", lines)
 
 
-def _run_head_layer_tuning(metric: str, config_path: Path) -> None:
+def _run_head_layer_tuning(metric: str, config_path: Path) -> dict[str, Any] | None:
+    """Run layer/head tuning and return {layer, head, score, metric} for the winner, or None."""
+    with tempfile.NamedTemporaryFile("w", suffix=".json", prefix="best_pipeline_", delete=False) as tf:
+        best_json_path = Path(tf.name)
+
     cmd = [
         sys.executable,
         str(ROOT / "scripts" / "tune_hyperparams.py"),
-        "--config",
-        str(config_path),
-        "--metric",
-        metric,
+        "--config", str(config_path),
+        "--metric", metric,
+        "--output-best-json", str(best_json_path),
     ]
     subprocess.run(cmd, cwd=str(ROOT), check=True)
+
+    if best_json_path.exists():
+        try:
+            return json.loads(best_json_path.read_text())
+        except Exception:
+            pass
+    return None
 
 
 def _run_patch_tuning(
     config_path: Path,
-    strategies: list[str],
+    regular_grid_sizes: list[int],
+    superpixel_segments: list[int],
+    patches_per_drop_range: list[int],
     dropout_iterations: list[int],
+    threshold_range: list[float],
     max_tune_samples: int,
 ) -> None:
     slug = "macro_patch_tuning"
@@ -289,12 +308,17 @@ def _run_patch_tuning(
             raise RuntimeError("No samples found for patch tuning run.")
 
         image_groups = _group_samples(samples)
+        # Hard-cap unique images to max_tune_samples regardless of dataset loader behaviour.
+        image_groups = dict(list(image_groups.items())[:max_tune_samples])
+        # Enforce 336×336 input resolution for all strategies in this sweep.
+        runner.cfg.setdefault("model", {})["image_size"] = 336
         print(f"Run dir : {writer.run_dir.relative_to(ROOT)}")
-        print(f"Samples : {len(samples)} | Images: {len(image_groups)}")
+        print(f"Samples : {len(samples)} | Images (capped): {len(image_groups)}")
 
         fieldnames = [
-            "strategy", "dropout_rounds", "miou", "miou_pct",
-            "mdice", "mdice_pct", "mask_coverage_mean", "elapsed_s", "status",
+            "strategy", "granularity", "patches_per_drop", "dropout_rounds", "threshold",
+            "miou", "miou_pct", "mdice", "mdice_pct", "mask_coverage_mean",
+            "elapsed_s", "status",
         ]
         csv_name = "macro_patch_tuning_results.csv"
         writer.open_csv(csv_name, fieldnames)
@@ -302,64 +326,150 @@ def _run_patch_tuning(
         results: list[dict[str, Any]] = []
         shared_wrapper = runner.inference_engine.wrapper if runner.inference_engine is not None else None
 
-        for strategy in strategies:
-            st = strategy.strip().lower()
-            if st not in {"regular", "superpixel", "regular_free"}:
-                raise ValueError(f"Unsupported patch strategy '{strategy}'.")
-
+        # ── Regular grid strategy loop ────────────────────────────────────────
+        # Uses regular_free (pixel-space G×G grid) to support sizes beyond the
+        # ViT patch grid limit (num_patches_per_side ≈ 21 for BLIP 336px/16px).
+        for grid_size in regular_grid_sizes:
             runner.cfg.setdefault("patching", {})
-            runner.cfg["patching"]["type"] = st
-            if st == "regular":
-                runner.cfg["patching"].setdefault("regular", {}).setdefault("grid_size", 21)
-            elif st == "regular_free":
-                runner.cfg["patching"].setdefault("regular_free", {}).setdefault("grid_size", 21)
-            else:
-                runner.cfg["patching"].setdefault("superpixel", {}).setdefault("n_segments", 256)
+            runner.cfg["patching"]["type"] = "regular_free"
+            runner.cfg["patching"].setdefault("regular_free", {})["grid_size"] = grid_size
 
-            for dr in dropout_iterations:
-                dr_i = int(dr)
-                t0 = time.perf_counter()
-                row: dict[str, Any] = {
-                    "strategy": st,
-                    "dropout_rounds": dr_i,
-                }
+            for ppd in patches_per_drop_range:
+                runner.cfg.setdefault("pipeline", {})["patches_per_drop"] = int(ppd)
 
-                try:
-                    runner.cfg.setdefault("pipeline", {})
-                    runner.cfg["pipeline"]["dropout_rounds"] = dr_i
+                for dr in dropout_iterations:
+                    runner.cfg["pipeline"]["dropout_rounds"] = int(dr)
 
-                    inf = InferenceEngine(runner.cfg, wrapper=shared_wrapper)
-                    eval_rows, _ = _render_eval_rows(image_groups, inf, dataset_spec)
-                    miou, mdice, cov = _compute_combo_metrics(eval_rows, dataset_spec)
-                    elapsed = time.perf_counter() - t0
+                    for thresh in threshold_range:
+                        runner.cfg.setdefault("postprocess", {})["threshold"] = float(thresh)
 
-                    row.update({
-                        "miou": round(miou, 4),
-                        "miou_pct": round(miou * 100, 1),
-                        "mdice": round(mdice, 4),
-                        "mdice_pct": round(mdice * 100, 1),
-                        "mask_coverage_mean": round(cov, 2),
-                        "elapsed_s": round(elapsed, 2),
-                        "status": "ok",
-                    })
+                        t0 = time.perf_counter()
+                        row: dict[str, Any] = {
+                            "strategy": "regular",
+                            "granularity": grid_size,
+                            "patches_per_drop": int(ppd),
+                            "dropout_rounds": int(dr),
+                            "threshold": thresh,
+                        }
 
-                    print(
-                        f"  strategy={st:<11} dr={dr_i:<2} "
-                        f"mIoU={miou:.4f} mDice={mdice:.4f} cov={cov:.1f}% ({elapsed:.1f}s)"
-                    )
+                        try:
+                            inf = InferenceEngine(runner.cfg, wrapper=shared_wrapper)
+                            eval_rows, _ = _render_eval_rows(image_groups, inf, dataset_spec)
+                            miou, mdice, cov = _compute_combo_metrics(eval_rows, dataset_spec)
+                            elapsed = time.perf_counter() - t0
 
-                except Exception as exc:
-                    elapsed = time.perf_counter() - t0
-                    row.update({
-                        "elapsed_s": round(elapsed, 2),
-                        "status": f"error:{exc}",
-                    })
-                    print(f"  strategy={st:<11} dr={dr_i:<2} ERROR ({elapsed:.1f}s): {exc}")
+                            row.update({
+                                "miou": round(miou, 4),
+                                "miou_pct": round(miou * 100, 1),
+                                "mdice": round(mdice, 4),
+                                "mdice_pct": round(mdice * 100, 1),
+                                "mask_coverage_mean": round(cov, 2),
+                                "elapsed_s": round(elapsed, 2),
+                                "status": "ok",
+                            })
+                            print(
+                                f"  regular   g={grid_size:<3} ppd={int(ppd):<3} dr={int(dr):<2} thr={thresh:.2f} "
+                                f"mIoU={miou:.4f} mDice={mdice:.4f} cov={cov:.1f}% ({elapsed:.1f}s)"
+                            )
 
-                results.append(row)
-                writer.write_csv_row(csv_name, row, fieldnames)
+                        except Exception as exc:
+                            elapsed = time.perf_counter() - t0
+                            row.update({"elapsed_s": round(elapsed, 2), "status": f"error:{exc}"})
+                            print(
+                                f"  regular   g={grid_size:<3} ppd={int(ppd):<3} dr={int(dr):<2} thr={thresh:.2f} "
+                                f"ERROR ({elapsed:.1f}s): {exc}"
+                            )
 
+                        results.append(row)
+                        writer.write_csv_row(csv_name, row, fieldnames)
+
+        # ── Superpixel strategy loop ──────────────────────────────────────────
+        for n_segs in superpixel_segments:
+            runner.cfg.setdefault("patching", {})
+            runner.cfg["patching"]["type"] = "superpixel"
+            runner.cfg["patching"].setdefault("superpixel", {})["n_segments"] = n_segs
+
+            for ppd in patches_per_drop_range:
+                runner.cfg.setdefault("pipeline", {})["patches_per_drop"] = int(ppd)
+
+                for dr in dropout_iterations:
+                    runner.cfg["pipeline"]["dropout_rounds"] = int(dr)
+
+                    for thresh in threshold_range:
+                        runner.cfg.setdefault("postprocess", {})["threshold"] = float(thresh)
+
+                        t0 = time.perf_counter()
+                        row: dict[str, Any] = {
+                            "strategy": "superpixel",
+                            "granularity": n_segs,
+                            "patches_per_drop": int(ppd),
+                            "dropout_rounds": int(dr),
+                            "threshold": thresh,
+                        }
+
+                        try:
+                            inf = InferenceEngine(runner.cfg, wrapper=shared_wrapper)
+                            eval_rows, _ = _render_eval_rows(image_groups, inf, dataset_spec)
+                            miou, mdice, cov = _compute_combo_metrics(eval_rows, dataset_spec)
+                            elapsed = time.perf_counter() - t0
+
+                            row.update({
+                                "miou": round(miou, 4),
+                                "miou_pct": round(miou * 100, 1),
+                                "mdice": round(mdice, 4),
+                                "mdice_pct": round(mdice * 100, 1),
+                                "mask_coverage_mean": round(cov, 2),
+                                "elapsed_s": round(elapsed, 2),
+                                "status": "ok",
+                            })
+                            print(
+                                f"  superpixel n={n_segs:<4} ppd={int(ppd):<3} dr={int(dr):<2} thr={thresh:.2f} "
+                                f"mIoU={miou:.4f} mDice={mdice:.4f} cov={cov:.1f}% ({elapsed:.1f}s)"
+                            )
+
+                        except Exception as exc:
+                            elapsed = time.perf_counter() - t0
+                            row.update({"elapsed_s": round(elapsed, 2), "status": f"error:{exc}"})
+                            print(
+                                f"  superpixel n={n_segs:<4} ppd={int(ppd):<3} dr={int(dr):<2} thr={thresh:.2f} "
+                                f"ERROR ({elapsed:.1f}s): {exc}"
+                            )
+
+                        results.append(row)
+                        writer.write_csv_row(csv_name, row, fieldnames)
+
+        # ── Best config selection by mDice ────────────────────────────────────
         ok_rows = [r for r in results if r.get("status") == "ok"]
+
+        # ── Zero-dice diagnostic ──────────────────────────────────────────────
+        # If every successful combo returned mDice=0.0, run a single sanity
+        # check at threshold=0.01 to distinguish "maps are sparse" from
+        # "attention maps are broken/empty".
+        if ok_rows and all(r.get("mdice", 0.0) == 0.0 for r in ok_rows):
+            print("\n" + _bold("[DIAGNOSTIC] All combos returned mDice=0.0 — probing threshold=0.01 on 1 sample..."))
+            first_group = dict(list(image_groups.items())[:1])
+            runner.cfg.setdefault("patching", {})
+            runner.cfg["patching"]["type"] = "regular_free"
+            runner.cfg["patching"].setdefault("regular_free", {})["grid_size"] = regular_grid_sizes[0]
+            runner.cfg.setdefault("pipeline", {})["dropout_rounds"] = 1
+            runner.cfg.setdefault("postprocess", {})["threshold"] = 0.01
+            try:
+                inf_diag = InferenceEngine(runner.cfg, wrapper=shared_wrapper)
+                diag_rows, _ = _render_eval_rows(first_group, inf_diag, dataset_spec)
+                _, mdice_d, cov_d = _compute_combo_metrics(diag_rows, dataset_spec)
+                if mdice_d > 0.0:
+                    print(
+                        f"  → mDice={mdice_d:.4f}  cov={cov_d:.1f}%  "
+                        "Attention maps exist — sweep thresholds are too high."
+                    )
+                else:
+                    print(
+                        f"  → mDice=0.0  cov={cov_d:.1f}%  "
+                        "Attention maps appear empty — verify layer/head selection."
+                    )
+            except Exception as exc:
+                print(f"  → Diagnostic error: {exc}")
+
         summary = [
             f"total_rows: {len(results)}",
             f"successful_rows: {len(ok_rows)}",
@@ -368,7 +478,9 @@ def _run_patch_tuning(
             best = max(ok_rows, key=lambda r: r.get("mdice", 0.0))
             summary.extend([
                 f"best_strategy: {best.get('strategy')}",
+                f"best_granularity: {best.get('granularity')}",
                 f"best_dropout_rounds: {best.get('dropout_rounds')}",
+                f"best_threshold: {best.get('threshold')}",
                 f"best_miou: {best.get('miou')}",
                 f"best_mdice: {best.get('mdice')}",
             ])
@@ -418,10 +530,15 @@ def main() -> None:
             _run_baseline_transfer(temp_cfg, slug, max_eval_samples=max_eval_samples)
         _log_block("=== END: BASELINE TRANSFER SWEEP ===")
 
+    # best_pipeline carries {layer, head} discovered during head/layer tuning.
+    # Prefer the 'dice' result (directly relevant); fall back to 'clip' or last run.
+    best_pipeline: dict[str, Any] | None = None
+
     head_cfg = macro.get("head_layer_tuning", {})
     if bool(head_cfg.get("run", False)):
         _log_block("=== START: HEAD/LAYER TUNING SWEEP ===")
         metrics = [str(m).strip().lower() for m in head_cfg.get("metrics", ["clip", "dice"])]
+        tuning_results: dict[str, dict[str, Any]] = {}
         for metric in metrics:
             if metric not in {"clip", "dice"}:
                 raise ValueError(f"Unsupported head_layer_tuning metric '{metric}'.")
@@ -432,27 +549,52 @@ def main() -> None:
             run_cfg["tuning"]["metric"] = metric
             run_cfg["tuning"]["max_images"] = max_tune_samples
             temp_cfg = _write_temp_config(run_cfg, prefix=f"macro_heads_{metric}_")
-            _run_head_layer_tuning(metric=metric, config_path=temp_cfg)
+            result = _run_head_layer_tuning(metric=metric, config_path=temp_cfg)
+            if result is not None:
+                tuning_results[metric] = result
+        for preferred in ("dice", "clip"):
+            if preferred in tuning_results:
+                best_pipeline = tuning_results[preferred]
+                break
+        if best_pipeline is None and tuning_results:
+            best_pipeline = next(iter(tuning_results.values()))
         _log_block("=== END: HEAD/LAYER TUNING SWEEP ===")
 
     patch_cfg = macro.get("patch_settings_tuning", {})
     if bool(patch_cfg.get("run", False)):
         _log_block("=== START: PATCH TUNING SWEEP ===")
-        strategies = [str(s).strip().lower() for s in patch_cfg.get("strategies", ["regular", "superpixel"])]
-        dropout_iterations = [int(v) for v in patch_cfg.get("dropout_iterations_range", [1, 2, 3, 4, 5])]
+        regular_grid_sizes = [int(v) for v in patch_cfg.get("regular_grid_sizes", [21])]
+        superpixel_segments = [int(v) for v in patch_cfg.get("superpixel_segments", [256])]
+        patches_per_drop_range = [int(v) for v in patch_cfg.get("patches_per_drop_range", [10])]
+        dropout_iterations = [int(v) for v in patch_cfg.get("dropout_iterations_range", [1, 2, 3])]
+        threshold_range = [float(v) for v in patch_cfg.get("threshold_range", [0.15])]
         if not dropout_iterations:
             raise ValueError("patch_settings_tuning.dropout_iterations_range cannot be empty.")
 
         raw_cfg = load_config(base_tune_cfg)
         run_cfg = _apply_macro_overrides(raw_cfg, macro, sample_cap=max_tune_samples)
+
+        # Pin the optimal layer/head discovered in the head/layer tuning stage.
+        if best_pipeline is not None:
+            best_L = int(best_pipeline["layer"])
+            best_H = int(best_pipeline["head"])
+            run_cfg.setdefault("pipeline", {})["layer"] = best_L
+            run_cfg["pipeline"]["head"] = best_H
+            print(_bold(f"STARTING PATCH SWEEP WITH PINNED HYPERPARAMS: L={best_L}, H={best_H}"))
+        else:
+            print(_bold("STARTING PATCH SWEEP WITH DEFAULT HYPERPARAMS (no tuning result available)"))
+
         run_cfg.setdefault("tune_pipeline", {})
         run_cfg["tune_pipeline"]["max_images"] = max_tune_samples
 
         temp_cfg = _write_temp_config(run_cfg, prefix="macro_patch_")
         _run_patch_tuning(
             config_path=temp_cfg,
-            strategies=strategies,
+            regular_grid_sizes=regular_grid_sizes,
+            superpixel_segments=superpixel_segments,
+            patches_per_drop_range=patches_per_drop_range,
             dropout_iterations=dropout_iterations,
+            threshold_range=threshold_range,
             max_tune_samples=max_tune_samples,
         )
         _log_block("=== END: PATCH TUNING SWEEP ===")

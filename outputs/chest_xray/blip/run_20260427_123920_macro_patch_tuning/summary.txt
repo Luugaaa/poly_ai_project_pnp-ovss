@@ -1,0 +1,8 @@
+total_rows: 72
+successful_rows: 45
+best_strategy: superpixel
+best_granularity: 64
+best_dropout_rounds: 2
+best_threshold: 0.05
+best_miou: 0.0137
+best_mdice: 0.0262

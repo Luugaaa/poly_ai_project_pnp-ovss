@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import csv
 from datetime import datetime
 from pathlib import Path
@@ -21,6 +22,15 @@ if TYPE_CHECKING:
 PROMPT_CLASS_ALIAS = {
     "diningtable": "table",
 }
+
+
+def _infer_transformer(cfg: dict) -> str:
+    name = str(cfg.get("model", {}).get("name", "")).lower()
+    if "blip" in name:
+        return "blip"
+    if "bridgetower" in name:
+        return "bridgetower"
+    return "unknown"
 
 PROMPT_PREFIX = "A picture of"
 
@@ -52,10 +62,13 @@ class InferenceEngine:
     """Encapsulates prompting, GradCAM extraction, patching, and Salience DropOut."""
 
     def __init__(self, cfg: dict, wrapper: Optional["BLIPWrapper"] = None) -> None:
-        self.cfg = cfg
-        self.pipeline_cfg = cfg["pipeline"]
-        self.patching_cfg = cfg["patching"]
-        self.postprocess_cfg = cfg["postprocess"]
+        # Deep-copy so each engine instance owns its config snapshot.
+        # This prevents config mutations in the orchestrator (e.g. granularity
+        # sweeps) from silently changing the behaviour of already-built engines.
+        self.cfg = copy.deepcopy(cfg)
+        self.pipeline_cfg = self.cfg["pipeline"]
+        self.patching_cfg = self.cfg["patching"]
+        self.postprocess_cfg = self.cfg["postprocess"]
 
         if wrapper is None:
             from models.blip_wrapper import BLIPWrapper
@@ -154,6 +167,9 @@ class InferenceEngine:
             use_blur=self.postprocess_cfg.get("use_blur", False),
             use_dense_crf=self.postprocess_cfg["use_dense_crf"],
         )
+        # Release any lingering CUDA tensors from the GradCAM passes.
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         return masks, strategy
 
     @staticmethod
@@ -179,12 +195,24 @@ class InferenceEngine:
 
 
 class ReportWriter:
-    """Writes config snapshots, CSV streams, and visual outputs to one isolated run directory."""
+    """Writes config snapshots, CSV streams, and visual outputs to one isolated run directory.
 
-    def __init__(self, root_dir: Path, slug: str, cfg: dict) -> None:
+    Output layout: root_dir / dataset_name / transformer_name / run_YYYYMMDD_HHMMSS_slug /
+    """
+
+    def __init__(
+        self,
+        root_dir: Path,
+        slug: str,
+        cfg: dict,
+        dataset_name: str = "",
+        transformer_name: str = "",
+    ) -> None:
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         safe_slug = slug.replace("/", "_").replace(" ", "_")
-        self.run_dir = root_dir / f"run_{ts}_{safe_slug}"
+        ds = (dataset_name.strip().lower() or str(cfg.get("dataset", {}).get("name", "unknown"))).lower()
+        tr = transformer_name.strip().lower() or _infer_transformer(cfg)
+        self.run_dir = root_dir / ds / tr / f"run_{ts}_{safe_slug}"
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
         self.cfg = cfg
@@ -254,7 +282,15 @@ class ExperimentRunner:
         self.inference_engine: Optional[InferenceEngine] = None
 
     def __enter__(self) -> "ExperimentRunner":
-        self.writer = ReportWriter(self.root / self.output_root, self.slug, self.cfg)
+        ds_name = str(self.cfg.get("dataset", {}).get("name", "unknown")).lower()
+        tr_name = _infer_transformer(self.cfg)
+        self.writer = ReportWriter(
+            self.root / self.output_root,
+            self.slug,
+            self.cfg,
+            dataset_name=ds_name,
+            transformer_name=tr_name,
+        )
         self.writer.save_config()
 
         ds_cfg = {**self.cfg["dataset"], **self.dataset_override}

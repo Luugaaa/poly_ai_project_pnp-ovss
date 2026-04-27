@@ -1,0 +1,8 @@
+metric: dice
+total_combinations: 144
+successful_combinations: 144
+best_layer: 9
+best_head: 3
+best_score: 0.579811
+best_clip_reward: 0
+best_mdice: 0.579811

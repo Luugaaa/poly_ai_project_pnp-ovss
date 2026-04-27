@@ -58,6 +58,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--config", default="config.yaml")
     p.add_argument("--metric", choices=["clip", "dice"], default=None,
                    help="Override tuning.metric from config.")
+    p.add_argument("--output-best-json", default=None,
+                   help="If given, write {layer, head, score, metric} of the best combo to this path.")
     p.add_argument("--verbose", action="store_true",
                    help="Print full tracebacks on errors.")
     return p.parse_args()
@@ -411,16 +413,27 @@ def main() -> None:
             f"total_combinations: {total}",
             f"successful_combinations: {len(ok_results)}",
         ]
+        best_result: dict | None = None
         if ok_results:
-            best = max(ok_results, key=lambda r: r.get(metric_score_key, 0.0))
+            best_result = max(ok_results, key=lambda r: r.get(metric_score_key, 0.0))
             summary_lines.extend([
-                f"best_layer: {best['layer']}",
-                f"best_head: {best['head']}",
-                f"best_score: {best.get(metric_score_key, 0.0)}",
-                f"best_clip_reward: {best.get('clip_reward', 0)}",
-                f"best_mdice: {best.get('mdice', 0.0)}",
+                f"best_layer: {best_result['layer']}",
+                f"best_head: {best_result['head']}",
+                f"best_score: {best_result.get(metric_score_key, 0.0)}",
+                f"best_clip_reward: {best_result.get('clip_reward', 0)}",
+                f"best_mdice: {best_result.get('mdice', 0.0)}",
             ])
         writer.save_text("summary.txt", summary_lines)
+
+        if args.output_best_json and best_result is not None:
+            import json
+            payload = {
+                "layer": int(best_result["layer"]),
+                "head": int(best_result["head"]),
+                "score": float(best_result.get(metric_score_key, 0.0)),
+                "metric": metric,
+            }
+            Path(args.output_best_json).write_text(json.dumps(payload))
 
 
 if __name__ == "__main__":

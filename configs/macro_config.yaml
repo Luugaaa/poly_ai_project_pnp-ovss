@@ -11,5 +11,8 @@ macro_sweep:
     metrics: ["clip", "dice"]
   patch_settings_tuning:
     run: true
-    strategies: ["regular", "superpixel"]
-    dropout_iterations_range: [1, 2, 3, 4, 5]
+    regular_grid_sizes: [16, 24, 32]      # G×G pixel-space grid dimensions
+    superpixel_segments: [64, 128, 256]   # N target segments for SLIC
+    patches_per_drop_range: [5, 10, 20]   # patches removed per dropout round
+    dropout_iterations_range: [0, 1, 2, 3] # 0 = baseline (no dropout)
+    threshold_range: [0.05, 0.1, 0.2]    # binarisation thresholds

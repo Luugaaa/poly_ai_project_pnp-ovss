@@ -1,0 +1,11 @@
+strategy,dropout_rounds,miou,miou_pct,mdice,mdice_pct,mask_coverage_mean,elapsed_s,status
+regular,1,0.0,0.0,0.0,0.0,0.88,5.29,ok
+regular,2,0.0,0.0,0.0,0.0,0.81,6.16,ok
+regular,3,0.0,0.0,0.0,0.0,0.96,6.66,ok
+regular,4,0.0,0.0,0.0,0.0,1.19,7.38,ok
+regular,5,0.0,0.0,0.0,0.0,1.27,7.98,ok
+superpixel,1,0.0017,0.2,0.0034,0.3,14.0,7.79,ok
+superpixel,2,0.0018,0.2,0.0035,0.3,14.64,8.56,ok
+superpixel,3,0.0018,0.2,0.0035,0.3,14.65,9.26,ok
+superpixel,4,0.0018,0.2,0.0035,0.3,14.65,10.11,ok
+superpixel,5,0.0018,0.2,0.0035,0.3,14.65,10.67,ok
