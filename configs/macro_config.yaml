@@ -1,0 +1,15 @@
+macro_sweep:
+  dataset_name: "chest_xray" # Toggle to "voc" for natural images
+  transformer: "blip" # or "bridgetower"
+  target_resolution: 336
+  max_eval_samples: 200
+  max_tune_samples: 30
+  transfer_configs:
+    - "configs/config_paper_baseline.yaml"
+  head_layer_tuning:
+    run: true
+    metrics: ["clip", "dice"]
+  patch_settings_tuning:
+    run: true
+    strategies: ["regular", "superpixel"]
+    dropout_iterations_range: [1, 2, 3, 4, 5]

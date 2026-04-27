@@ -1,120 +1,80 @@
 """
-Dataset loaders for PnP-OVSS evaluation
-=========================================
-Two backends are provided:
+Dataset loaders for PnP-OVSS evaluation.
 
-  PascalVOCDataset
-    Wraps torchvision's VOCSegmentation (year=2012, auto-download).
-    Yields one sample per (image, class) pair — so a single image that
-    contains both "cat" and "dog" produces two samples.
-    Ground-truth masks are binary: 1 where the class is present, 0 elsewhere
-    (boundary pixels with label 255 are treated as "ignore / unknown").
-
-  FolderDataset
-    Simple folder structure you can populate yourself:
-
-        data/folder/
-          {class_name}/
-            {image_id}.jpg      (or .png)
-            {image_id}_mask.png  (binary: 255=foreground, 0=background)
-
-    Mask files are optional — if absent, IoU cannot be computed but the
-    pipeline still runs (useful for inference-only mode).
-
-Both return ``EvalSample`` named tuples so the evaluate script is
-backend-agnostic.
+All loaders emit dictionary samples with explicit keys:
+- image_uid: stable per-image ID (no class suffix)
+- class_name: semantic class
+- image_id: per-sample ID for CSV/logging
+- image, gt_mask, gt_label_map, source
 """
 
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Iterator, List, Optional, TypedDict
 
 import numpy as np
 from PIL import Image
 
+from datasets.core import DatasetSpec
+from datasets.specs import (
+    ChestXrayDatasetSpec,
+    VOC_CLASS_NAMES,
+    VOCDatasetSpec,
+)
 
-# ── VOC class registry ───────────────────────────────────────────────────────
-# Index 0 = background; indices 1–20 = classes; 255 = void/boundary (ignore).
-VOC_CLASSES: List[str] = [
-    "background",   # 0  — never used as a query class
-    "aeroplane",    # 1
-    "bicycle",      # 2
-    "bird",         # 3
-    "boat",         # 4
-    "bottle",       # 5
-    "bus",          # 6
-    "car",          # 7
-    "cat",          # 8
-    "chair",        # 9
-    "cow",          # 10
-    "diningtable",  # 11
-    "dog",          # 12
-    "horse",        # 13
-    "motorbike",    # 14
-    "person",       # 15
-    "pottedplant",  # 16
-    "sheep",        # 17
-    "sofa",         # 18
-    "train",        # 19
-    "tvmonitor",    # 20
-]
 
-# Map class name → VOC pixel value (1–20)
+INPUT_SIZE = 336
+VOC_CLASSES: List[str] = VOC_CLASS_NAMES
 VOC_CLASS_TO_IDX: dict[str, int] = {c: i for i, c in enumerate(VOC_CLASSES)}
 
 
-@dataclass
-class EvalSample:
-    """One (image, class) evaluation unit."""
-    image_id:   str                     # unique identifier for logging / CSV
+class EvalSample(TypedDict):
+    image_uid: str
+    image_id: str
     class_name: str
-    image:      Image.Image             # RGB PIL image (original resolution)
-    gt_mask:    Optional[np.ndarray]    # bool [H, W] — None if unavailable
-    gt_label_map: Optional[np.ndarray] = None  # uint8 [H, W] full semantic labels (VOC only)
-    source:     str = ""                # "voc" | "folder"
+    image: Image.Image
+    gt_mask: Optional[np.ndarray]
+    gt_label_map: Optional[np.ndarray]
+    source: str
 
 
-# ── Pascal VOC 2012 ──────────────────────────────────────────────────────────
+def _resize_rgb(img: Image.Image) -> Image.Image:
+    return img.convert("RGB").resize((INPUT_SIZE, INPUT_SIZE), Image.BILINEAR)
+
+
+def _resize_mask_nearest(mask: np.ndarray) -> np.ndarray:
+    m = Image.fromarray(mask.astype(np.uint8), mode="L")
+    return np.array(m.resize((INPUT_SIZE, INPUT_SIZE), Image.NEAREST), dtype=np.uint8)
+
 
 class PascalVOCDataset:
-    """
-    Pascal VOC 2012 segmentation dataset.
-
-    Parameters
-    ----------
-    root        : str | Path — where to store / find the data.
-                  torchvision downloads to root/VOCdevkit/VOC2012/ on first run.
-    split       : "train" | "val" | "trainval"
-    max_images  : int, optional — cap the number of *images* (not samples).
-    min_pixels  : int — minimum GT foreground pixels for a class to be included.
-                  Filters out near-invisible classes.
-    classes     : list[str], optional — restrict to these class names (VOC_CLASSES).
-                  None means all 20 classes.
-    seed        : int — random seed for shuffling before max_images cap.
-    download    : bool — pass True to auto-download (~2 GB).
-    """
+    """Pascal VOC 2012 segmentation dataset."""
 
     def __init__(
         self,
         root: str | Path = "data/voc",
         split: str = "val",
         max_images: Optional[int] = 200,
-        min_pixels: int = 200,
+        min_pixels: Optional[int] = 200,
         classes: Optional[List[str]] = None,
         seed: int = 42,
         download: bool = True,
+        max_samples: Optional[int] = None,
     ) -> None:
         try:
             import torchvision.datasets as tvd
         except ImportError:
             raise ImportError("torchvision is required for PascalVOCDataset.")
 
-        self.root       = Path(root)
+        self.dataset_spec: DatasetSpec = VOCDatasetSpec()
+        self.root = Path(root)
         self.min_pixels = min_pixels
-        self.classes    = set(classes) if classes else set(VOC_CLASSES[1:])
+        self.max_samples = max_samples
+        default_classes = self.dataset_spec.query_class_names
+        self.classes = set(classes) if classes else set(default_classes)
 
         ds = tvd.VOCSegmentation(
             root=str(self.root),
@@ -123,7 +83,6 @@ class PascalVOCDataset:
             download=download,
         )
 
-        # Shuffle then cap
         indices = list(range(len(ds)))
         random.seed(seed)
         random.shuffle(indices)
@@ -133,35 +92,45 @@ class PascalVOCDataset:
         self._items: list[tuple[Image.Image, np.ndarray, str]] = []
         for i in indices:
             img, mask_pil = ds[i]
-            mask_np = np.array(mask_pil, dtype=np.uint8)   # [H, W] values 0–20, 255
-            # Build image_id from the underlying file path
-            img_path = ds.images[i]
-            image_id = Path(img_path).stem
-            self._items.append((img.convert("RGB"), mask_np, image_id))
+            mask_np = np.array(mask_pil, dtype=np.uint8)
+            image_uid = Path(ds.images[i]).stem
+            self._items.append((img.convert("RGB"), mask_np, image_uid))
 
     def __len__(self) -> int:
-        return sum(
+        total = sum(
             1
-            for img, mask, _ in self._items
-            for cls_name in self._classes_in_mask(mask)
+            for _, mask, _ in self._items
+            for _cls_name in self._classes_in_mask(mask)
         )
+        if self.max_samples is not None:
+            return min(total, self.max_samples)
+        return total
 
     def __iter__(self) -> Iterator[EvalSample]:
-        for image, mask_np, image_id in self._items:
+        generator = self._iter_impl()
+        if self.max_samples is not None:
+            yield from islice(generator, self.max_samples)
+        else:
+            yield from generator
+
+    def _iter_impl(self) -> Iterator[EvalSample]:
+        for image, mask_np, image_uid in self._items:
+            resized_image = _resize_rgb(image)
+            resized_label_map = _resize_mask_nearest(mask_np)
             for cls_name in self._classes_in_mask(mask_np):
-                cls_idx  = VOC_CLASS_TO_IDX[cls_name]
-                gt_mask  = (mask_np == cls_idx)             # bool [H, W]
+                cls_idx = VOC_CLASS_TO_IDX[cls_name]
+                gt_mask = resized_label_map == cls_idx
                 yield EvalSample(
-                    image_id   = f"{image_id}_{cls_name}",
-                    class_name = cls_name,
-                    image      = image,
-                    gt_mask    = gt_mask,
-                    gt_label_map = mask_np,
-                    source     = "voc",
+                    image_uid=image_uid,
+                    image_id=f"{image_uid}_{cls_name}",
+                    class_name=cls_name,
+                    image=resized_image,
+                    gt_mask=gt_mask,
+                    gt_label_map=resized_label_map,
+                    source="voc",
                 )
 
     def _classes_in_mask(self, mask: np.ndarray) -> list[str]:
-        """Return class names present in the mask with >= min_pixels pixels."""
         threshold = self.min_pixels if self.min_pixels is not None else 1
         present = []
         for cls_name in self.classes:
@@ -174,21 +143,29 @@ class PascalVOCDataset:
         return len(self._items)
 
 
-# ── Folder dataset ────────────────────────────────────────────────────────────
+class _FolderDatasetSpec(DatasetSpec):
+    def __init__(self, class_names: list[str]) -> None:
+        self._class_names = class_names
+
+    @property
+    def class_names(self) -> List[str]:
+        return list(self._class_names)
+
+    @property
+    def background_index(self) -> int:
+        return -1
+
+    @property
+    def ignore_label(self) -> int:
+        return 255
+
+    @property
+    def id_to_name(self) -> dict[int, str]:
+        return {i: n for i, n in enumerate(self._class_names)}
+
 
 class FolderDataset:
-    """
-    Minimal folder-based dataset.
-
-    Expected layout
-    ---------------
-    root/
-      {class_name}/
-        {image_id}.jpg   (or .png, .jpeg)
-        {image_id}_mask.png   ← optional; 255=foreground, 0=background
-
-    All subdirectories of ``root`` are treated as class names.
-    """
+    """Simple folder-based dataset layout."""
 
     _IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -197,16 +174,20 @@ class FolderDataset:
         root: str | Path,
         max_images: Optional[int] = None,
         seed: int = 42,
+        max_samples: Optional[int] = None,
     ) -> None:
         self.root = Path(root)
         if not self.root.exists():
             raise FileNotFoundError(f"Dataset root not found: {self.root}")
 
+        self.max_samples = max_samples
         items: list[tuple[Path, str]] = []
+        class_names: set[str] = set()
         for cls_dir in sorted(self.root.iterdir()):
             if not cls_dir.is_dir():
                 continue
             class_name = cls_dir.name
+            class_names.add(class_name)
             for img_path in sorted(cls_dir.iterdir()):
                 if img_path.suffix.lower() not in self._IMG_EXTS:
                     continue
@@ -219,66 +200,172 @@ class FolderDataset:
         if max_images is not None:
             items = items[:max_images]
         self._items = items
+        self.dataset_spec: DatasetSpec = _FolderDatasetSpec(sorted(class_names))
 
     def __len__(self) -> int:
-        return len(self._items)
+        n = len(self._items)
+        if self.max_samples is not None:
+            return min(n, self.max_samples)
+        return n
 
     def __iter__(self) -> Iterator[EvalSample]:
-        for img_path, class_name in self._items:
-            image = Image.open(img_path).convert("RGB")
+        generator = self._iter_impl()
+        if self.max_samples is not None:
+            yield from islice(generator, self.max_samples)
+        else:
+            yield from generator
 
-            # Look for optional mask: {stem}_mask.png
+    def _iter_impl(self) -> Iterator[EvalSample]:
+        for img_path, class_name in self._items:
+            image_uid = img_path.stem
+            image = _resize_rgb(Image.open(img_path))
             mask_path = img_path.with_name(img_path.stem + "_mask.png")
             gt_mask: Optional[np.ndarray] = None
             if mask_path.exists():
                 m = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)
-                gt_mask = m > 127                           # bool [H, W]
+                gt_mask = _resize_mask_nearest(m) > 127
 
             yield EvalSample(
-                image_id   = f"{class_name}_{img_path.stem}",
-                class_name = class_name,
-                image      = image,
-                gt_mask    = gt_mask,
-                gt_label_map = None,
-                source     = "folder",
+                image_uid=image_uid,
+                image_id=f"{class_name}_{image_uid}",
+                class_name=class_name,
+                image=image,
+                gt_mask=gt_mask,
+                gt_label_map=None,
+                source="folder",
             )
 
 
-# ── Factory ───────────────────────────────────────────────────────────────────
+class ChestXrayDataset:
+    """Kaggle chest X-ray dataset with image/mask pairing from CXR_png and masks."""
 
-def build_dataset(cfg: dict) -> "PascalVOCDataset | FolderDataset":
-    """
-    Instantiate a dataset from the ``dataset`` section of config.yaml.
+    _IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-    cfg keys
-    --------
-    name        : "voc" | "folder"
-    root        : path to data directory
-    split       : "val" | "train" | "trainval"  (VOC only)
-    max_images  : int or null
-    min_pixels  : int  (VOC only)
-    classes     : list[str] or null  (VOC only)
-    seed        : int
-    download    : bool  (VOC only)
-    """
-    name = cfg.get("name", "voc")
+    def __init__(
+        self,
+        root: str | Path = "data/chest_xray",
+        max_images: Optional[int] = None,
+        seed: int = 42,
+        max_samples: Optional[int] = None,
+    ) -> None:
+        self.root = Path(root)
+        if not self.root.exists():
+            raise FileNotFoundError(f"Dataset root not found: {self.root}")
+
+        self.max_samples = max_samples
+        self.dataset_spec: DatasetSpec = ChestXrayDatasetSpec()
+        cxr_dir, mask_dir = self._resolve_pair_dirs(self.root)
+        self.cxr_dir = cxr_dir
+        self.mask_dir = mask_dir
+
+        mask_by_stem = {}
+        for p in sorted(mask_dir.iterdir()):
+            if p.is_file() and p.suffix.lower() in self._IMG_EXTS:
+                mask_by_stem[p.stem] = p
+
+        items: list[tuple[Path, Path]] = []
+        for img_path in sorted(cxr_dir.iterdir()):
+            if not img_path.is_file() or img_path.suffix.lower() not in self._IMG_EXTS:
+                continue
+            mask_path = mask_by_stem.get(img_path.stem)
+            if mask_path is None:
+                continue
+            items.append((img_path, mask_path))
+
+        random.seed(seed)
+        random.shuffle(items)
+        if max_images is not None:
+            items = items[:max_images]
+        self._items = items
+
+    @staticmethod
+    def _resolve_pair_dirs(root: Path) -> tuple[Path, Path]:
+        candidates = [
+            (root / "CXR_png", root / "masks"),
+            (root / "Lung Segmentation" / "CXR_png", root / "Lung Segmentation" / "masks"),
+            (root / "data" / "Lung Segmentation" / "CXR_png", root / "data" / "Lung Segmentation" / "masks"),
+        ]
+        for img_dir, m_dir in candidates:
+            if img_dir.exists() and m_dir.exists():
+                return img_dir, m_dir
+
+        found_cxr = next((p for p in root.rglob("CXR_png") if p.is_dir()), None)
+        found_masks = next((p for p in root.rglob("masks") if p.is_dir()), None)
+        if found_cxr is None or found_masks is None:
+            raise FileNotFoundError(
+                "Could not find paired CXR_png and masks directories under "
+                f"{root}"
+            )
+        return found_cxr, found_masks
+
+    def __len__(self) -> int:
+        n = len(self._items)
+        if self.max_samples is not None:
+            return min(n, self.max_samples)
+        return n
+
+    def __iter__(self) -> Iterator[EvalSample]:
+        generator = self._iter_impl()
+        if self.max_samples is not None:
+            yield from islice(generator, self.max_samples)
+        else:
+            yield from generator
+
+    def _iter_impl(self) -> Iterator[EvalSample]:
+        for img_path, mask_path in self._items:
+            image_uid = img_path.stem
+            image = _resize_rgb(Image.open(img_path))
+            mask = np.array(Image.open(mask_path).convert("L"), dtype=np.uint8)
+            gt_mask = _resize_mask_nearest(mask) > 127
+
+            yield EvalSample(
+                image_uid=image_uid,
+                image_id=image_uid,
+                class_name="lungs",
+                image=image,
+                gt_mask=gt_mask,
+                gt_label_map=None,
+                source="chest_xray",
+            )
+
+    def num_images(self) -> int:
+        return len(self._items)
+
+
+def build_dataset(cfg: dict) -> PascalVOCDataset | FolderDataset | ChestXrayDataset:
+    """Instantiate a dataset from the config dataset section."""
+
+    name = (cfg.get("name", "voc") or "voc").strip().lower()
+    max_samples = cfg.get("max_samples", None)
 
     if name == "voc":
         return PascalVOCDataset(
-            root       = cfg.get("root", "data/voc"),
-            split      = cfg.get("split", "val"),
-            max_images = cfg.get("max_images", None),   # None = no cap
-            min_pixels = cfg.get("min_pixels", None),   # None = no filter
-            classes    = cfg.get("classes", None),
-            seed       = cfg.get("seed", 42),
-            download   = cfg.get("download", True),
+            root=cfg.get("root", "data/voc"),
+            split=cfg.get("split", "val"),
+            max_images=cfg.get("max_images", None),
+            min_pixels=cfg.get("min_pixels", None),
+            classes=cfg.get("classes", None),
+            seed=cfg.get("seed", 42),
+            download=cfg.get("download", True),
+            max_samples=max_samples,
         )
 
     if name == "folder":
         return FolderDataset(
-            root       = cfg.get("root", "data/folder"),
-            max_images = cfg.get("max_images", None),
-            seed       = cfg.get("seed", 42),
+            root=cfg.get("root", "data/folder"),
+            max_images=cfg.get("max_images", None),
+            seed=cfg.get("seed", 42),
+            max_samples=max_samples,
         )
 
-    raise ValueError(f"Unknown dataset name '{name}'. Choose 'voc' or 'folder'.")
+    if name in {"chest_xray", "chestxray", "kaggle_chest_xray"}:
+        return ChestXrayDataset(
+            root=cfg.get("root", "data/chest_xray"),
+            max_images=cfg.get("max_images", None),
+            seed=cfg.get("seed", 42),
+            max_samples=max_samples,
+        )
+
+    raise ValueError(
+        f"Unknown dataset name '{name}'. Choose 'voc', 'folder', or 'chest_xray'."
+    )

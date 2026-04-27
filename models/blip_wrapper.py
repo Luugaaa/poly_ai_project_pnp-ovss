@@ -299,9 +299,19 @@ class BLIPWrapper:
             itm_logits = self.model.itm_head(
                 text_out.last_hidden_state[:, 0, :]
             )
-            
+
             loss = itm_logits[:, 1].sum()
-            loss.backward()
+            attn_tensor = captured.get("attn")
+            if attn_tensor is not None:
+                grad_tuple = torch.autograd.grad(
+                    outputs=loss,
+                    inputs=attn_tensor,
+                    retain_graph=False,
+                    create_graph=False,
+                    allow_unused=True,
+                )
+                if grad_tuple and grad_tuple[0] is not None:
+                    captured["grad"] = grad_tuple[0].detach().clone()
 
         hook_handle.remove()
 

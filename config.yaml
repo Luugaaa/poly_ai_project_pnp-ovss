@@ -62,5 +62,7 @@ tune_pipeline:
   vision_batch_size: 16
 tuning:
   blip_batch_size: 4
+  metric: clip
+  mask_threshold: 0.25
   max_images: 50
   out_dir: experiments

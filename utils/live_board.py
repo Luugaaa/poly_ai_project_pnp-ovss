@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Mapping, Optional
 
 import matplotlib
 matplotlib.use("Agg")
@@ -38,9 +38,6 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-
-from utils.dataset import EvalSample
-
 
 # ── Colour helpers ────────────────────────────────────────────────────────────
 
@@ -149,7 +146,7 @@ class LiveBoard:
 
     def update(
         self,
-        sample: EvalSample,
+        sample: Mapping[str, object],
         mask: np.ndarray,
         iou: float,
         running_miou: float,
@@ -158,9 +155,9 @@ class LiveBoard:
         """Call after each successfully processed sample."""
         # Build cell
         cell = _make_cell(
-            image      = sample.image,
+            image      = sample["image"],
             mask       = mask,
-            class_name = sample.class_name,
+            class_name = str(sample["class_name"]),
             iou        = iou,
             thumb_size = self.thumb_size,
         )

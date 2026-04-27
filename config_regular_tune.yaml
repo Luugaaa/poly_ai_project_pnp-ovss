@@ -1,0 +1,62 @@
+model:
+  name: Salesforce/blip-itm-large-flickr
+  device: auto
+  image_size: 336
+
+patching:
+  type: regular_free
+  regular:
+    grid_size: 21
+  regular_free:
+    grid_size: 21
+
+pipeline:
+  layer: 7
+  head: 9
+  dropout_rounds: 3
+  patches_per_drop: 10
+  use_full_ensemble: false
+
+postprocess:
+  threshold: 0.15
+  gaussian_sigma: 0.05
+  use_blur: true
+  use_dense_crf: true
+
+clip:
+  model: openai/clip-vit-large-patch14-336
+
+dataset:
+  name: voc
+  root: data/voc
+  split: val
+  download: true
+  max_images: 50
+  min_pixels: null
+  classes: null
+  seed: 42
+
+output:
+  dir: results
+  save_iterations: true
+
+tune_pipeline:
+  out_dir: experiments/config_tune
+  metric: dice
+  max_images: 50
+  blip_batch_size: 4
+  vision_batch_size: 16
+  mask_threshold: 0.25
+  dropout_rounds_max: 6
+  patches_per_drop: [5, 10, 25, 35, 50]
+  regular:
+    # Non-divisible grid sizes are allowed, but grid_size must be <= P.
+    # For image_size=336 and patch_size=16, P=21.
+    grid_sizes: [12, 16, 21]
+  regular_free:
+    # Pixel-space regular grid. Can exceed P because boundaries are in pixels.
+    grid_sizes: [12, 16, 21, 24, 28]
+  superpixel:
+    n_segments: [144, 256, 441, 576, 784]
+    compactness: 10.0
+    sigma: 1.0

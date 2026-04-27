@@ -57,6 +57,7 @@ DEFAULTS: dict[str, Any] = {
         "split": "val",
         "download": True,
         "max_images": None,
+        "max_samples": None,
         "min_pixels": None,
         "classes": None,
         "seed": 42,
@@ -68,6 +69,9 @@ DEFAULTS: dict[str, Any] = {
         "out_dir": "experiments",
         "use_crf": True,
         "max_images": 50,
+        "metric": "clip",
+        "mask_threshold": 0.25,
+        "blip_batch_size": 4,
     },
 }
 
