@@ -6,33 +6,33 @@
 
   Class                     N      mIoU     mDice
   -------------------------------------------------
-  aeroplane                10    0.0000    0.0000
-  bicycle                   7    0.0002    0.0004
-  bird                     16    0.0002    0.0005
-  boat                      5    0.0001    0.0002
-  bottle                   10    0.0000    0.0000
-  bus                      13    0.0001    0.0003
-  car                      12    0.0000    0.0000
-  cat                       9    0.0001    0.0001
-  chair                    10    0.0000    0.0000
-  cow                       7    0.0000    0.0000
-  diningtable               9    0.0002    0.0005
-  dog                       9    0.0000    0.0001
-  horse                     7    0.0000    0.0000
-  motorbike                10    0.0000    0.0000
-  person                   39    0.0000    0.0000
-  pottedplant               7    0.0001    0.0002
-  sheep                     4    0.0000    0.0000
-  sofa                      8    0.0071    0.0135
-  train                     5    0.0046    0.0090
-  tvmonitor                 3    0.0000    0.0000
+  aeroplane                10    0.6460    0.7758
+  bicycle                   7    0.1629    0.2693
+  bird                     16    0.6568    0.7722
+  boat                      5    0.5653    0.7159
+  bottle                   10    0.2548    0.3383
+  bus                      13    0.3578    0.4629
+  car                      12    0.4149    0.5239
+  cat                       9    0.7657    0.8607
+  chair                    10    0.2726    0.3951
+  cow                       7    0.8101    0.8912
+  diningtable               9    0.3126    0.4364
+  dog                       9    0.5934    0.7287
+  horse                     7    0.7106    0.8274
+  motorbike                10    0.4882    0.6453
+  person                   39    0.3265    0.4352
+  pottedplant               7    0.1838    0.2704
+  sheep                     4    0.5679    0.6912
+  sofa                      8    0.6724    0.7752
+  train                     5    0.4783    0.5580
+  tvmonitor                 3    0.5703    0.7209
   =================================================
-  Overall Mean IoU        200    0.0005
-  Overall Mean Dice       200    0.0009
+  Overall Mean IoU        200    0.4609
+  Overall Mean Dice       200    0.5736
 ============================================================
 
 Global Metrics (multiclass confusion matrix)
-  Global Mean IoU: 0.0365
-  Global Mean Dice: 0.0433
-  Background IoU: 0.7341
-  Background Dice: 0.8467
+  Global Mean IoU: 0.5680
+  Global Mean Dice: 0.6985
+  Background IoU: 0.8497
+  Background Dice: 0.9187

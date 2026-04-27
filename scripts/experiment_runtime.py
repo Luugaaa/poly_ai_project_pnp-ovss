@@ -184,7 +184,7 @@ class InferenceEngine:
         # Release any lingering CUDA tensors from the GradCAM passes.
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        return masks, strategy
+        return masks, strategy, spatial_maps
 
     @staticmethod
     def extract_gradcam_mask(
@@ -267,6 +267,80 @@ class ReportWriter:
     def save_text(self, file_name: str, lines: list[str]) -> Path:
         out = self.run_dir / file_name
         out.write_text("\n".join(lines))
+        return out
+
+    def save_combo_visualization(
+        self,
+        rel_path: str,
+        image,
+        salience_map: np.ndarray,
+        binary_mask: np.ndarray,
+    ) -> Path:
+        """
+        Save a 3-panel composite to visualizations/:
+          [Original Image] | [Class-Agnostic Salience U(t)] | [Final Mask Overlay]
+
+        Parameters
+        ----------
+        rel_path     : relative path under run_dir (e.g. "visualizations/combo.png")
+        image        : PIL.Image.Image — original image
+        salience_map : ndarray [H, W] float32 — accumulated class-agnostic salience
+        binary_mask  : ndarray [H, W] float32 — final binarised segmentation mask
+        """
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+        from PIL import Image as PILImage
+
+        out = self.run_dir / rel_path
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        img_arr = np.array(image.convert("RGB"))
+        H_img, W_img = img_arr.shape[:2]
+
+        # Resize salience to display resolution
+        mn, mx = float(salience_map.min()), float(salience_map.max())
+        sal_norm = (salience_map - mn) / (mx - mn + 1e-8)
+        if sal_norm.shape != (H_img, W_img):
+            sal_pil = PILImage.fromarray((sal_norm * 255).astype(np.uint8)).resize(
+                (W_img, H_img), PILImage.BILINEAR
+            )
+            sal_display = np.array(sal_pil, dtype=np.float32) / 255.0
+        else:
+            sal_display = sal_norm
+
+        # Resize binary mask to display resolution
+        if binary_mask.shape != (H_img, W_img):
+            msk_pil = PILImage.fromarray((binary_mask * 255).astype(np.uint8)).resize(
+                (W_img, H_img), PILImage.NEAREST
+            )
+            binary_mask = np.array(msk_pil, dtype=np.float32) / 255.0
+
+        # Panel 3: heat overlay + green tint on foreground mask
+        grey = np.array(image.convert("L"), dtype=np.float32) / 255.0
+        grey_rgb = np.stack([grey, grey, grey], axis=-1)
+        heat_rgb = cm.jet(sal_display)[..., :3]
+        overlay = np.clip(0.5 * grey_rgb + 0.5 * heat_rgb, 0.0, 1.0)
+        mask_bool = binary_mask > 0.5
+        overlay[mask_bool, 0] *= 0.4
+        overlay[mask_bool, 1] = np.clip(overlay[mask_bool, 1] * 0.6 + 0.4, 0.0, 1.0)
+        overlay[mask_bool, 2] *= 0.4
+
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        axes[0].imshow(img_arr)
+        axes[0].set_title("Original Image", fontsize=11)
+        axes[0].axis("off")
+        axes[1].imshow(sal_display, cmap="jet", vmin=0, vmax=1)
+        axes[1].set_title("Class-Agnostic Salience U(t)", fontsize=11)
+        axes[1].axis("off")
+        axes[2].imshow(np.clip(overlay, 0.0, 1.0))
+        axes[2].set_title("Final Binary Mask Overlay", fontsize=11)
+        axes[2].axis("off")
+
+        plt.tight_layout()
+        plt.savefig(str(out), dpi=110, bbox_inches="tight")
+        plt.close(fig)
         return out
 
     def close(self) -> None:

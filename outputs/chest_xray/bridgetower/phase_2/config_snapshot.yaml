@@ -1,0 +1,52 @@
+model:
+  name: BridgeTower/bridgetower-large-itm-mlm-itc
+  device: auto
+  image_size: 336
+patching:
+  type: regular
+  regular:
+    grid_size: 21
+  regular_free:
+    grid_size: 21
+  superpixel:
+    n_segments: 100
+    compactness: 10.0
+    sigma: 1.0
+pipeline:
+  layer: 5
+  head: 3
+  dropout_rounds: 3
+  patches_per_drop: 10
+  use_full_ensemble: false
+  class_filtering:
+    mode: gt_present
+    top_k: 5
+postprocess:
+  threshold: 0.15
+  gaussian_sigma: 0.05
+  use_blur: false
+  use_dense_crf: true
+output:
+  dir: results
+  save_iterations: true
+dataset:
+  name: chest_xray
+  root: data/chest_xray
+  split: val
+  download: true
+  max_images: 30
+  max_samples: 30
+  min_pixels: null
+  classes: null
+  seed: 42
+clip:
+  model: openai/clip-vit-large-patch14-336
+tuning:
+  out_dir: experiments
+  use_crf: true
+  max_images: 30
+  metric: clip
+  mask_threshold: 0.25
+  blip_batch_size: 4
+tune_pipeline:
+  max_images: 30

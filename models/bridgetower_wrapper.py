@@ -21,7 +21,8 @@ try:
 except ImportError:  # pragma: no cover - depends on transformers version
     from transformers import BridgeTowerForImageAndTextRetrieval as _BridgeTowerMatchingModel
 
-from transformers import BridgeTowerProcessor
+from transformers import BridgeTowerImageProcessor, BridgeTowerProcessor
+from transformers import AutoTokenizer
 
 
 def get_device() -> torch.device:
@@ -37,6 +38,7 @@ class BridgeTowerWrapper:
     """Wraps BridgeTower retrieval models for PnP-OVSS."""
 
     DEFAULT_MODEL = "BridgeTower/bridgetower-large-itm-mlm-itc"
+    PROCESSOR_MODEL = "BridgeTower/bridgetower-base-itm-mlm"
 
     def __init__(
         self,
@@ -47,11 +49,40 @@ class BridgeTowerWrapper:
         self.device = device if device is not None else get_device()
         self.input_size = input_size
         print(f"[BridgeTowerWrapper] Loading '{model_name}' on device '{self.device}' …")
-        self.processor: BridgeTowerProcessor = BridgeTowerProcessor.from_pretrained(model_name)
+        # Load processor from the same model being used so image_size matches.
+        # PROCESSOR_MODEL (base) has image_size=288; large model expects a different size.
+        image_processor = BridgeTowerImageProcessor.from_pretrained(model_name)
+        tokenizer = AutoTokenizer.from_pretrained(self.PROCESSOR_MODEL, use_fast=True)
+        self.processor: BridgeTowerProcessor = BridgeTowerProcessor(
+            image_processor=image_processor,
+            tokenizer=tokenizer,
+        )
+        # RoBERTa/BridgeTower has a <pad> token (ID 1) but doesn't set pad_token attribute
+        # Explicitly set it so padding=True works in tokenizer calls
+        if self.processor.tokenizer.pad_token is None:
+            # Token ID 1 is <pad> in RoBERTa vocab
+            self.processor.tokenizer.pad_token_id = 1
+
+        # Cache the processor's native image size so preprocess never overrides it.
+        # BridgeTowerImageProcessor.size returns a SizeDict (not a plain dict),
+        # so we check for the .shortest_edge attribute before dict/int fallbacks.
+        try:
+            size_cfg = self.processor.image_processor.size
+            if hasattr(size_cfg, "shortest_edge"):
+                self._native_image_size: int = int(size_cfg.shortest_edge)
+            elif hasattr(size_cfg, "get"):
+                self._native_image_size = int(
+                    size_cfg.get("shortest_edge", size_cfg.get("height", 288))
+                )
+            else:
+                self._native_image_size = int(size_cfg)
+        except (AttributeError, TypeError, ValueError):
+            self._native_image_size = 288
+
         self.model = _BridgeTowerMatchingModel.from_pretrained(model_name)
         self.model.to(self.device)
         self.model.eval()
-        print("[BridgeTowerWrapper] Ready.")
+        print(f"[BridgeTowerWrapper] Ready. Native image size: {self._native_image_size}px")
 
     @property
     def _base_model(self):
@@ -59,7 +90,12 @@ class BridgeTowerWrapper:
 
     @property
     def num_text_layers(self) -> int:
-        return len(self._base_model.text_model.encoder.layer)
+        """Number of cross-modal encoder layers (not text encoder layers).
+        
+        BridgeTower has 6 cross-modal layers that perform cross-attention between
+        image and text. This is what we tune for layer/head selection.
+        """
+        return len(self._base_model.cross_modal_text_layers)
 
     @property
     def num_heads(self) -> int:
@@ -75,35 +111,26 @@ class BridgeTowerWrapper:
 
     @property
     def image_size(self) -> int:
-        if self.input_size is not None:
-            return int(self.input_size)
-        vision_embeddings = self._base_model.vision_model.visual.embeddings
-        image_size = getattr(vision_embeddings, "image_size", None)
-        if image_size is not None:
-            return int(image_size)
-        return int(getattr(self._base_model.config.vision_config, "image_size", 336))
+        # Always use the native size from the processor that was loaded for this
+        # model variant. Ignores input_size so callers can't accidentally force
+        # the BLIP default (336) onto BridgeTower.
+        return self._native_image_size
 
     @property
     def num_patches_per_side(self) -> int:
         return self.image_size // self.patch_size
 
     def preprocess(self, image: Image.Image, text: str) -> dict[str, torch.Tensor]:
-        kwargs = {
-            "images": image,
-            "text": text,
-            "return_tensors": "pt",
-            "padding": True,
-        }
-        if self.input_size is not None:
-            kwargs["size"] = {"height": self.input_size, "width": self.input_size}
-        inputs = self.processor(**kwargs)
+        inputs = self.processor(
+            images=image,
+            text=text,
+            return_tensors="pt",
+            padding=True,
+        )
         return {k: v.to(self.device) for k, v in inputs.items()}
 
     def preprocess_image(self, image: Image.Image) -> torch.Tensor:
-        kwargs = {"images": image, "return_tensors": "pt"}
-        if self.input_size is not None:
-            kwargs["size"] = {"height": self.input_size, "width": self.input_size}
-        out = self.processor(**kwargs)
+        out = self.processor(images=image, return_tensors="pt")
         return out["pixel_values"].to(self.device)
 
     def preprocess_text(self, texts: list[str] | str) -> dict[str, torch.Tensor]:
@@ -145,9 +172,11 @@ class BridgeTowerWrapper:
                 outputs = self.model(
                     **model_inputs,
                     labels=torch.ones(input_ids.shape[0], dtype=torch.long, device=self.device),
+                    interpolate_pos_encoding=True,
                 )
 
-            attn = captured.get("attn")
+            attn = captured.pop("attn", None)
+            captured.clear()
             if attn is None:
                 raise RuntimeError(f"BridgeTower cross-attention hook did not fire for layer {layer_idx}.")
 
@@ -157,16 +186,18 @@ class BridgeTowerWrapper:
                 if logits is None:
                     raise RuntimeError("BridgeTower model did not return logits or loss.")
                 loss = logits[:, -1].sum()
+            # Free the output object early; the grad computation only needs loss.
+            del outputs
 
             grad = torch.autograd.grad(loss, attn, retain_graph=False, create_graph=False, allow_unused=True)[0]
-            if grad is None:
-                grad = attn.grad
+            del loss
             if grad is None:
                 raise RuntimeError("BridgeTower cross-attention gradient was not captured.")
 
-            return attn, grad
+            return attn.detach(), grad.detach()
         finally:
             hook_handle.remove()
+            captured.clear()
 
     def get_cross_attention(
         self,
@@ -186,8 +217,7 @@ class BridgeTowerWrapper:
         attention_mask: torch.Tensor,
         layer_idx: int,
     ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
-        attn, grad = self._capture_cross_attention(pixel_values, input_ids, attention_mask, layer_idx)
-        return attn.detach(), grad.detach()
+        return self._capture_cross_attention(pixel_values, input_ids, attention_mask, layer_idx)
 
     def mask_patches(
         self,

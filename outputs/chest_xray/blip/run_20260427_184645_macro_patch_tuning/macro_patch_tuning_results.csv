@@ -1,0 +1,5 @@
+strategy,granularity,patches_per_drop,dropout_rounds,threshold,miou,miou_pct,mdice,mdice_pct,mask_coverage_mean,elapsed_s,status
+regular,12,10,0,0.05,0.4329,43.3,0.602,60.2,62.24,4.35,ok
+regular,12,10,0,0.1,0.5289,52.9,0.6892,68.9,48.86,4.02,ok
+regular,12,10,0,0.2,0.6666,66.7,0.7984,79.8,30.41,4.02,ok
+regular,12,10,1,0.05,0.4003,40.0,0.5701,57.0,67.38,4.64,ok

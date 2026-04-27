@@ -1,0 +1,7 @@
+layer,head,metric,clip_reward,clip_reward_pct,mdice,mask_coverage_mean,salience_max_mean,score,elapsed_s,status,total_possible_reward
+0,0,dice,0,0.0,0.111299,6.43,0.000122,0.111299,3.04,ok,30
+0,1,dice,0,0.0,0.121988,3.86,7.6e-05,0.121988,2.95,ok,30
+0,2,dice,0,0.0,0.060414,5.41,0.000796,0.060414,2.82,ok,30
+0,3,dice,0,0.0,0.050156,6.45,0.000145,0.050156,2.9,ok,30
+0,4,dice,0,0.0,0.140224,3.42,0.002192,0.140224,2.88,ok,30
+0,5,dice,0,0.0,0.123974,7.39,0.00016,0.123974,2.95,ok,30

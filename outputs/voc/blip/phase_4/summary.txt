@@ -1,0 +1,39 @@
+============================================================
+  PnP-OVSS Evaluation Summary
+  Run: final_eval_voc
+============================================================
+  Samples processed : 200   succeeded : 200
+
+  Class                     N      mIoU     mDice
+  -------------------------------------------------
+  aeroplane                10    0.7784    0.8720
+  bicycle                   7    0.0697    0.1217
+  bird                     16    0.7371    0.8441
+  boat                      5    0.5662    0.7101
+  bottle                   10    0.2503    0.3382
+  bus                      13    0.3385    0.4509
+  car                      12    0.2032    0.2826
+  cat                       9    0.8040    0.8880
+  chair                    10    0.1403    0.2299
+  cow                       7    0.7838    0.8735
+  diningtable               9    0.3898    0.5087
+  dog                       9    0.5986    0.6840
+  horse                     7    0.7794    0.8736
+  motorbike                10    0.3849    0.5312
+  person                   39    0.3786    0.5021
+  pottedplant               7    0.0737    0.1288
+  sheep                     4    0.6206    0.7499
+  sofa                      8    0.6628    0.7882
+  train                     5    0.5597    0.7132
+  tvmonitor                 3    0.3433    0.4954
+  =================================================
+  Overall Mean IoU        200    0.4573
+  Overall Mean Dice       200    0.5633
+============================================================
+
+Global Metrics (multiclass confusion matrix)
+  Global Mean IoU: 0.5330
+  Global Mean Dice: 0.6526
+  Background IoU: 0.8309
+  Background Dice: 0.9076
+visualizations_saved: 12

@@ -1,0 +1,2 @@
+total_rows: 72
+successful_rows: 0

@@ -1,0 +1,8 @@
+metric: clip
+total_combinations: 144
+successful_combinations: 144
+best_layer: 5
+best_head: 10
+best_score: 17
+best_clip_reward: 17
+best_mdice: 0.0

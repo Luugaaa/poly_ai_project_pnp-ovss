@@ -42,6 +42,7 @@ from typing import Set
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 
 # ── Abstract base ───────────────────────────────────────────────────────────
@@ -277,15 +278,34 @@ class RegularFreePatchStrategy(PatchStrategy):
         return self._G * self._G
 
     def aggregate(self, flat_scores: torch.Tensor) -> torch.Tensor:
-        """[P*P] -> [G*G] by overlap-weighted mean in pixel space."""
-        scores_np = flat_scores.cpu().float().numpy()
-        result = np.zeros(self.num_segments, dtype=np.float32)
-        for seg in range(self.num_segments):
-            idxs = self._seg_patches[seg]
-            if len(idxs) > 0:
-                result[seg] = scores_np[idxs].mean()
+        """
+        [P*P] → [G*G] via bilinear upsample to img_size then average-pool into grid cells.
+
+        Upsampling the ViT token grid to full pixel resolution before binning
+        decouples the evaluation granularity from the ViT's native patch size
+        and produces smoother, interpolated salience estimates per segment.
+        """
+        P = self._P
+        # Reshape to [1, 1, P, P] and bilinearly upsample to model-input resolution
+        sal_2d = flat_scores.float().reshape(1, 1, P, P)
+        sal_full = F.interpolate(
+            sal_2d,
+            size=(self._img_size, self._img_size),
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze()  # [img_size, img_size]
+
+        # Average-pool upsampled salience into G×G pixel-space grid cells
+        G = self._G
+        result = torch.zeros(self.num_segments, dtype=torch.float32)
+        for r in range(G):
+            r0, r1 = self._bounds[r], self._bounds[r + 1]
+            for c in range(G):
+                c0, c1 = self._bounds[c], self._bounds[c + 1]
+                result[r * G + c] = sal_full[r0:r1, c0:c1].mean()
+
         dev = flat_scores.device if self._device is None else self._device
-        return torch.tensor(result, device=dev)
+        return result.to(dev)
 
     def top_k(self, scores: torch.Tensor, remaining: Set[int], k: int) -> Set[int]:
         return self._top_k_from_list(scores, list(remaining), k)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import gc
 import json
 import subprocess
 import sys
@@ -131,20 +132,39 @@ def _render_eval_rows(
     image_groups: dict[str, list[Mapping[str, object]]],
     inference_engine: InferenceEngine,
     dataset_spec,
-) -> tuple[list[tuple[str, np.ndarray, np.ndarray | None]], dict[str, dict[str, np.ndarray]]]:
+) -> tuple[
+    list[tuple[str, np.ndarray, np.ndarray | None]],
+    dict[str, dict[str, np.ndarray]],
+    dict[str, np.ndarray] | None,
+    object | None,
+]:
+    """
+    Returns
+    -------
+    rows            : list of (class_name, pred_mask, gt_mask)
+    masks_by_image  : binary masks per image per class
+    first_spatial   : dict[class_name → spatial_map ndarray] for the first image
+    first_image     : PIL.Image for the first image (for visualization)
+    """
     rows: list[tuple[str, np.ndarray, np.ndarray | None]] = []
     masks_by_image: dict[str, dict[str, np.ndarray]] = {}
+    first_spatial: dict[str, np.ndarray] | None = None
+    first_image = None
 
-    for image_uid, samples in image_groups.items():
+    for i, (image_uid, samples) in enumerate(image_groups.items()):
         image = samples[0]["image"]
         selected_classes = sorted({str(s["class_name"]) for s in samples})
 
-        masks, _ = inference_engine.infer_multiclass_masks(
+        masks, _, spatial_maps = inference_engine.infer_multiclass_masks(
             image=image,
             selected_classes=selected_classes,
             full_ensemble_classes=dataset_spec.query_class_names,
         )
         masks_by_image[image_uid] = masks
+
+        if i == 0:
+            first_spatial = spatial_maps
+            first_image = image
 
         for sample in samples:
             class_name = str(sample["class_name"])
@@ -163,7 +183,7 @@ def _render_eval_rows(
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-    return rows, masks_by_image
+    return rows, masks_by_image, first_spatial, first_image
 
 
 def _compute_combo_metrics(rows: list[tuple[str, np.ndarray, np.ndarray | None]], dataset_spec) -> tuple[float, float, float]:
@@ -187,6 +207,8 @@ def _run_baseline_transfer(
     slug: str,
     max_eval_samples: int,
     output_dir: Path | None = None,
+    save_visualizations: bool = False,
+    max_visualizations: int = 12,
 ) -> None:
     with ExperimentRunner(
         config_path=str(config_path),
@@ -223,12 +245,14 @@ def _run_baseline_transfer(
         print(f"Run dir : {writer.run_dir.relative_to(ROOT)}")
         print(f"Samples : {len(samples)} | Images: {len(grouped)}")
 
+        saved_visuals = 0
+
         for image_uid, image_samples in grouped.items():
             t0 = time.perf_counter()
             image = image_samples[0]["image"]
             selected_classes = sorted({str(s["class_name"]) for s in image_samples})
 
-            masks, _ = inf.infer_multiclass_masks(
+            masks, *_ = inf.infer_multiclass_masks(
                 image=image,
                 selected_classes=selected_classes,
                 full_ensemble_classes=dataset_spec.query_class_names,
@@ -259,6 +283,11 @@ def _run_baseline_transfer(
                     "status": "ok",
                 }
                 writer.write_csv_row(csv_name, row, fieldnames)
+
+                if save_visualizations and saved_visuals < max_visualizations:
+                    vis_rel = f"masks/{image_id}_{class_name}.png"
+                    writer.save_mask_overlay(vis_rel, pred, image)
+                    saved_visuals += 1
                 ok += 1
 
             metrics.update_confusion_from_label_map(
@@ -267,6 +296,8 @@ def _run_baseline_transfer(
             )
 
         lines = metrics.build_summary(done=done, ok=ok, run_slug=slug)
+        if save_visualizations:
+            lines.append(f"visualizations_saved: {saved_visuals}")
         writer.save_text("summary.txt", lines)
 
 
@@ -341,9 +372,40 @@ def _run_patch_tuning(
         results: list[dict[str, Any]] = []
         shared_wrapper = runner.inference_engine.wrapper if runner.inference_engine is not None else None
 
-        # ── Regular grid strategy loop ────────────────────────────────────────
-        # Uses regular_free (pixel-space G×G grid) to support sizes beyond the
-        # ViT patch grid limit (num_patches_per_side ≈ 21 for BLIP 336px/16px).
+        # ── Helper: save mandatory composite visualization for one combo ─────────
+        def _save_combo_viz(
+            row: dict[str, Any],
+            first_spatial: dict[str, np.ndarray] | None,
+            first_image_vis,
+            masks_by_image: dict[str, dict[str, np.ndarray]],
+        ) -> None:
+            if first_spatial is None or first_image_vis is None:
+                return
+            sal_vals = list(first_spatial.values())
+            if not sal_vals:
+                return
+            sal_agnostic = np.mean(np.stack(sal_vals, axis=0), axis=0)
+            first_uid = next(iter(image_groups))
+            first_class = next(iter(first_spatial))
+            rep_mask = masks_by_image.get(first_uid, {}).get(
+                first_class, np.zeros_like(sal_agnostic)
+            )
+            strat = str(row.get("strategy", "combo"))
+            gran = row.get("granularity", 0)
+            dr = int(row.get("dropout_rounds", 0))
+            thr = float(row.get("threshold", 0.0))
+            label = f"{strat}_g{gran}_dr{dr}_t{thr:.2f}".replace(".", "p")
+            writer.save_combo_visualization(
+                f"visualizations/{label}.png",
+                first_image_vis,
+                sal_agnostic,
+                rep_mask,
+            )
+
+        # ── Regular-free grid strategy loop ───────────────────────────────────
+        # Uses RegularFreePatchStrategy (pixel-space G×G grid) which bilinearly
+        # upsamples ViT token scores to 336×336 before binning — decoupled from
+        # the ViT native patch size.
         for grid_size in regular_grid_sizes:
             regular_cfg = copy.deepcopy(base_run_cfg)
             regular_cfg.setdefault("patching", {})
@@ -371,7 +433,9 @@ def _run_patch_tuning(
 
                         try:
                             inf = InferenceEngine(combo_cfg, wrapper=shared_wrapper)
-                            eval_rows, _ = _render_eval_rows(image_groups, inf, dataset_spec)
+                            eval_rows, masks_by_image, first_spatial, first_image_vis = (
+                                _render_eval_rows(image_groups, inf, dataset_spec)
+                            )
                             miou, mdice, cov = _compute_combo_metrics(eval_rows, dataset_spec)
                             elapsed = time.perf_counter() - t0
 
@@ -388,6 +452,7 @@ def _run_patch_tuning(
                                 f"  regular   g={grid_size:<3} ppd={int(ppd):<3} dr={int(dr):<2} thr={thresh:.2f} "
                                 f"mIoU={miou:.4f} mDice={mdice:.4f} cov={cov:.1f}% ({elapsed:.1f}s)"
                             )
+                            _save_combo_viz(row, first_spatial, first_image_vis, masks_by_image)
 
                         except Exception as exc:
                             elapsed = time.perf_counter() - t0
@@ -399,6 +464,11 @@ def _run_patch_tuning(
 
                         results.append(row)
                         writer.write_csv_row(csv_name, row, fieldnames)
+                        # Force cyclic GC to collect any attention-tensor cycles
+                        # that CPython's reference counter cannot break on its own.
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
 
         # ── Superpixel strategy loop ──────────────────────────────────────────
         for n_segs in superpixel_segments:
@@ -428,7 +498,9 @@ def _run_patch_tuning(
 
                         try:
                             inf = InferenceEngine(combo_cfg, wrapper=shared_wrapper)
-                            eval_rows, _ = _render_eval_rows(image_groups, inf, dataset_spec)
+                            eval_rows, masks_by_image, first_spatial, first_image_vis = (
+                                _render_eval_rows(image_groups, inf, dataset_spec)
+                            )
                             miou, mdice, cov = _compute_combo_metrics(eval_rows, dataset_spec)
                             elapsed = time.perf_counter() - t0
 
@@ -445,6 +517,7 @@ def _run_patch_tuning(
                                 f"  superpixel n={n_segs:<4} ppd={int(ppd):<3} dr={int(dr):<2} thr={thresh:.2f} "
                                 f"mIoU={miou:.4f} mDice={mdice:.4f} cov={cov:.1f}% ({elapsed:.1f}s)"
                             )
+                            _save_combo_viz(row, first_spatial, first_image_vis, masks_by_image)
 
                         except Exception as exc:
                             elapsed = time.perf_counter() - t0
@@ -456,6 +529,9 @@ def _run_patch_tuning(
 
                         results.append(row)
                         writer.write_csv_row(csv_name, row, fieldnames)
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
 
         # ── Best config selection by mDice ────────────────────────────────────
         ok_rows = [r for r in results if r.get("status") == "ok"]
@@ -469,12 +545,13 @@ def _run_patch_tuning(
             first_group = dict(list(image_groups.items())[:1])
             runner.cfg.setdefault("patching", {})
             runner.cfg["patching"]["type"] = "regular_free"
-            runner.cfg["patching"].setdefault("regular_free", {})["grid_size"] = regular_grid_sizes[0]
+            diag_grid = regular_grid_sizes[0] if regular_grid_sizes else (superpixel_segments[0] if superpixel_segments else 16)
+            runner.cfg["patching"].setdefault("regular_free", {})["grid_size"] = diag_grid
             runner.cfg.setdefault("pipeline", {})["dropout_rounds"] = 1
             runner.cfg.setdefault("postprocess", {})["threshold"] = 0.01
             try:
                 inf_diag = InferenceEngine(runner.cfg, wrapper=shared_wrapper)
-                diag_rows, _ = _render_eval_rows(first_group, inf_diag, dataset_spec)
+                diag_rows, *_ = _render_eval_rows(first_group, inf_diag, dataset_spec)
                 _, mdice_d, cov_d = _compute_combo_metrics(diag_rows, dataset_spec)
                 if mdice_d > 0.0:
                     print(
@@ -571,6 +648,8 @@ def main() -> None:
 
     only = args.only_phase
     output_phase_dir = Path(args.output_phase_dir) if args.output_phase_dir else None
+    if output_phase_dir is not None and not output_phase_dir.is_absolute():
+        output_phase_dir = ROOT / output_phase_dir
 
     transfer_cfgs = [
         _resolve_transfer_config(p)
@@ -660,8 +739,27 @@ def main() -> None:
     should_run_patch = (only == "patch-tuning") or (only is None and bool(patch_cfg.get("run", False)))
     if should_run_patch:
         _log_block("=== START: PHASE 2 — PATCH/DROPOUT TUNING ===")
-        regular_grid_sizes  = [int(v) for v in patch_cfg.get("regular_grid_sizes", [16, 32])]
+        # Accept either the new regular_free_sizes key or the legacy regular_grid_sizes.
+        regular_grid_sizes = [
+            int(v) for v in (
+                patch_cfg.get("regular_free_sizes")
+                or patch_cfg.get("regular_grid_sizes", [16, 32])
+            )
+        ]
         superpixel_segments = [int(v) for v in patch_cfg.get("superpixel_segments", [64, 128, 256])]
+
+        # Filter by the "strategies" (or "strategy") key if present.
+        # Accepts both singular and plural, and "regular" as an alias for "regular_free".
+        _strat_raw = patch_cfg.get("strategies") or patch_cfg.get("strategy")
+        if _strat_raw is not None:
+            _active = {str(s).strip().lower() for s in _strat_raw}
+            if not (_active & {"regular_free", "regular"}):
+                regular_grid_sizes = []
+                print(_bold("Phase 2: 'regular_free' excluded by strategies filter — skipping regular loop."))
+            if "superpixel" not in _active:
+                superpixel_segments = []
+                print(_bold("Phase 2: 'superpixel' excluded by strategies filter — skipping superpixel loop."))
+
         patches_per_drop_range = [int(v) for v in patch_cfg.get("patches_per_drop_range", [10])]
         dropout_iterations  = [int(v) for v in patch_cfg.get("dropout_iterations_range", [0, 1, 2, 3])]
         threshold_range     = [float(v) for v in patch_cfg.get("threshold_range", [0.05, 0.1, 0.2])]
@@ -735,7 +833,14 @@ def main() -> None:
 
         temp_cfg = _write_temp_config(run_cfg, prefix="macro_final_eval_")
         slug = f"final_eval_{run_cfg['dataset']['name']}"
-        _run_baseline_transfer(temp_cfg, slug, max_eval_samples, output_dir=output_phase_dir)
+        _run_baseline_transfer(
+            temp_cfg,
+            slug,
+            max_eval_samples,
+            output_dir=output_phase_dir,
+            save_visualizations=True,
+            max_visualizations=12,
+        )
         _log_block("=== END: PHASE 4 — FINAL EVALUATION ===")
 
     _log_block("=== MACRO SWEEP COMPLETE ===")

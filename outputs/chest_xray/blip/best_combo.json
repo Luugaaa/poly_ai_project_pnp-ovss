@@ -1,0 +1,7 @@
+{
+  "strategy": "regular",
+  "granularity": 12,
+  "patches_per_drop": 10,
+  "dropout_rounds": 0,
+  "threshold": 0.2
+}
