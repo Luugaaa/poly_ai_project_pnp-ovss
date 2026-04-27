@@ -1,0 +1,77 @@
+
+[1m=== START: BASELINE TRANSFER SWEEP ===[0m
+[1mTransfer config: configs/config_paper_baseline.yaml[0m
+[BLIPWrapper] Loading 'Salesforce/blip-itm-large-flickr' on device 'cuda' …
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|                                  | 0/616 [00:00<?, ?it/s]Loading weights: 100%|█████████████████████| 616/616 [00:00<00:00, 54125.72it/s]
+[BLIPWrapper] Ready.
+Run dir : outputs/chest_xray/blip/run_20260427_133134_transfer_config_paper_baseline_chest_xray
+Samples : 138 | Images: 138
+
+[1m=== END: BASELINE TRANSFER SWEEP ===[0m
+
+[1m=== START: PATCH TUNING SWEEP ===[0m
+[1mSTARTING PATCH SWEEP WITH PINNED HYPERPARAMS: L=9, H=3[0m
+[BLIPWrapper] Loading 'Salesforce/blip-itm-large-flickr' on device 'cuda' …
+Loading weights:   0%|                                  | 0/616 [00:00<?, ?it/s]Loading weights: 100%|█████████████████████| 616/616 [00:00<00:00, 59061.20it/s]
+[BLIPWrapper] Ready.
+Run dir : outputs/chest_xray/blip/run_20260427_133247_macro_patch_tuning
+Samples : 30 | Images (capped): 30
+  regular   g=16  ppd=10  dr=0  thr=0.05 mIoU=0.5207 mDice=0.6825 cov=49.3% (5.0s)
+  regular   g=16  ppd=10  dr=0  thr=0.10 mIoU=0.6356 mDice=0.7742 cov=33.3% (5.1s)
+  regular   g=16  ppd=10  dr=0  thr=0.20 mIoU=0.5320 mDice=0.6789 cov=17.6% (5.3s)
+  regular   g=16  ppd=10  dr=1  thr=0.05 mIoU=0.4557 mDice=0.6245 cov=58.4% (5.7s)
+  regular   g=16  ppd=10  dr=1  thr=0.10 mIoU=0.5527 mDice=0.7104 cov=45.5% (5.7s)
+  regular   g=16  ppd=10  dr=1  thr=0.20 mIoU=0.6805 mDice=0.8080 cov=28.5% (5.6s)
+  regular   g=16  ppd=10  dr=2  thr=0.05 mIoU=0.4342 mDice=0.6040 cov=61.8% (6.4s)
+  regular   g=16  ppd=10  dr=2  thr=0.10 mIoU=0.5141 mDice=0.6770 cov=50.4% (6.5s)
+  regular   g=16  ppd=10  dr=2  thr=0.20 mIoU=0.6579 mDice=0.7912 cov=33.9% (6.4s)
+  regular   g=24  ppd=10  dr=0  thr=0.05 mIoU=0.5861 mDice=0.7360 cov=36.7% (5.6s)
+  regular   g=24  ppd=10  dr=0  thr=0.10 mIoU=0.5246 mDice=0.6738 cov=21.4% (5.6s)
+  regular   g=24  ppd=10  dr=0  thr=0.20 mIoU=0.2614 mDice=0.3564 cov=7.0% (5.6s)
+  regular   g=24  ppd=10  dr=1  thr=0.05 mIoU=0.5266 mDice=0.6872 cov=48.2% (6.5s)
+  regular   g=24  ppd=10  dr=1  thr=0.10 mIoU=0.6087 mDice=0.7540 cov=34.6% (6.3s)
+  regular   g=24  ppd=10  dr=1  thr=0.20 mIoU=0.5564 mDice=0.6957 cov=18.1% (6.3s)
+  regular   g=24  ppd=10  dr=2  thr=0.05 mIoU=0.4936 mDice=0.6588 cov=52.8% (7.1s)
+  regular   g=24  ppd=10  dr=2  thr=0.10 mIoU=0.5778 mDice=0.7292 cov=41.1% (7.1s)
+  regular   g=24  ppd=10  dr=2  thr=0.20 mIoU=0.6328 mDice=0.7692 cov=24.9% (7.2s)
+  regular   g=32  ppd=10  dr=0  thr=0.05 mIoU=0.5958 mDice=0.7421 cov=28.5% (6.5s)
+  regular   g=32  ppd=10  dr=0  thr=0.10 mIoU=0.4483 mDice=0.5895 cov=14.6% (6.3s)
+  regular   g=32  ppd=10  dr=0  thr=0.20 mIoU=0.1178 mDice=0.1734 cov=3.0% (6.3s)
+  regular   g=32  ppd=10  dr=1  thr=0.05 mIoU=0.5911 mDice=0.7401 cov=39.6% (7.0s)
+  regular   g=32  ppd=10  dr=1  thr=0.10 mIoU=0.6298 mDice=0.7671 cov=26.8% (7.1s)
+  regular   g=32  ppd=10  dr=1  thr=0.20 mIoU=0.4248 mDice=0.5595 cov=12.3% (7.3s)
+  regular   g=32  ppd=10  dr=2  thr=0.05 mIoU=0.5601 mDice=0.7150 cov=44.4% (8.0s)
+  regular   g=32  ppd=10  dr=2  thr=0.10 mIoU=0.6366 mDice=0.7755 cov=31.9% (8.1s)
+  regular   g=32  ppd=10  dr=2  thr=0.20 mIoU=0.5509 mDice=0.6951 cov=17.7% (7.9s)
+  superpixel n=64   ppd=10  dr=0  thr=0.05 mIoU=0.3940 mDice=0.5637 cov=68.5% (7.1s)
+  superpixel n=64   ppd=10  dr=0  thr=0.10 mIoU=0.4574 mDice=0.6253 cov=58.5% (7.3s)
+  superpixel n=64   ppd=10  dr=0  thr=0.20 mIoU=0.5596 mDice=0.7144 cov=43.9% (7.2s)
+  superpixel n=64   ppd=10  dr=1  thr=0.05 mIoU=0.3575 mDice=0.5248 cov=75.7% (7.8s)
+  superpixel n=64   ppd=10  dr=1  thr=0.10 mIoU=0.3996 mDice=0.5691 cov=67.4% (7.8s)
+  superpixel n=64   ppd=10  dr=1  thr=0.20 mIoU=0.4718 mDice=0.6381 cov=56.2% (7.8s)
+  superpixel n=64   ppd=10  dr=2  thr=0.05 mIoU=0.3468 mDice=0.5132 cov=78.0% (8.6s)
+  superpixel n=64   ppd=10  dr=2  thr=0.10 mIoU=0.3636 mDice=0.5284 cov=70.1% (8.4s)
+  superpixel n=64   ppd=10  dr=2  thr=0.20 mIoU=0.3889 mDice=0.5472 cov=54.2% (8.7s)
+  superpixel n=128  ppd=10  dr=0  thr=0.05 mIoU=0.4395 mDice=0.6089 cov=61.2% (7.4s)
+  superpixel n=128  ppd=10  dr=0  thr=0.10 mIoU=0.5269 mDice=0.6875 cov=48.8% (7.3s)
+  superpixel n=128  ppd=10  dr=0  thr=0.20 mIoU=0.6669 mDice=0.7970 cov=31.3% (7.3s)
+  superpixel n=128  ppd=10  dr=1  thr=0.05 mIoU=0.3966 mDice=0.5666 cov=68.0% (7.9s)
+  superpixel n=128  ppd=10  dr=1  thr=0.10 ERROR (0.4s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.96 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=128  ppd=10  dr=1  thr=0.20 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=128  ppd=10  dr=2  thr=0.05 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=128  ppd=10  dr=2  thr=0.10 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=128  ppd=10  dr=2  thr=0.20 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=256  ppd=10  dr=0  thr=0.05 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=256  ppd=10  dr=0  thr=0.10 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=256  ppd=10  dr=0  thr=0.20 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=256  ppd=10  dr=1  thr=0.05 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=256  ppd=10  dr=1  thr=0.10 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=256  ppd=10  dr=1  thr=0.20 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=256  ppd=10  dr=2  thr=0.05 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=256  ppd=10  dr=2  thr=0.10 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+  superpixel n=256  ppd=10  dr=2  thr=0.20 ERROR (0.1s): CUDA out of memory. Tried to allocate 12.00 MiB. GPU 0 has a total capacity of 94.96 GiB of which 3.12 MiB is free. Process 1014687 has 5.28 GiB memory in use. Including non-PyTorch memory, this process has 89.62 GiB memory in use. Of the allocated memory 86.95 GiB is allocated by PyTorch, and 2.01 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf)
+
+[1m=== END: PATCH TUNING SWEEP ===[0m
+
+[1m=== MACRO SWEEP COMPLETE ===[0m

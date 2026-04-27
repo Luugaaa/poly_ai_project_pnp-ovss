@@ -21,6 +21,11 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any, Mapping
 
+import os
+# Prevent CUDA memory fragmentation across many GradCAM passes in a long sweep.
+# Must be set before the CUDA allocator initialises (first .cuda() call).
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np
 import torch
 import yaml
@@ -98,8 +103,9 @@ def _apply_macro_overrides(base_cfg: dict[str, Any], macro: dict[str, Any], samp
         if "blip" not in model_name:
             cfg["model"]["name"] = "Salesforce/blip-itm-large-flickr"
     elif transformer == "bridgetower":
-        # Kept for schema compatibility; runtime support depends on model wrapper implementation.
         cfg["model"]["name"] = "BridgeTower/bridgetower-large-itm-mlm-itc"
+    elif transformer == "albef":
+        cfg["model"]["name"] = "Salesforce/albef-base-itm"
     else:
         raise ValueError(f"Unsupported macro_sweep.transformer '{transformer}'.")
 
@@ -177,13 +183,19 @@ def _compute_combo_metrics(rows: list[tuple[str, np.ndarray, np.ndarray | None]]
     return miou, mdice, cov
 
 
-def _run_baseline_transfer(config_path: Path, slug: str, max_eval_samples: int) -> None:
+def _run_baseline_transfer(
+    config_path: Path,
+    slug: str,
+    max_eval_samples: int,
+    output_dir: Path | None = None,
+) -> None:
     with ExperimentRunner(
         config_path=str(config_path),
         root=ROOT,
         slug=slug,
         output_root="outputs",
         dataset_override={"max_images": int(max_eval_samples), "max_samples": int(max_eval_samples)},
+        run_dir_override=output_dir,
     ) as runner:
         writer = runner.writer
         dataset = runner.dataset
@@ -289,6 +301,8 @@ def _run_patch_tuning(
     dropout_iterations: list[int],
     threshold_range: list[float],
     max_tune_samples: int,
+    output_dir: Path | None = None,
+    best_combo_out: Path | None = None,
 ) -> None:
     slug = "macro_patch_tuning"
     with ExperimentRunner(
@@ -297,6 +311,7 @@ def _run_patch_tuning(
         slug=slug,
         output_root="outputs",
         dataset_override={"max_images": int(max_tune_samples), "max_samples": int(max_tune_samples)},
+        run_dir_override=output_dir,
     ) as runner:
         writer = runner.writer
         dataset = runner.dataset
@@ -484,6 +499,16 @@ def _run_patch_tuning(
                 f"best_miou: {best.get('miou')}",
                 f"best_mdice: {best.get('mdice')}",
             ])
+            if best_combo_out is not None:
+                best_combo_out.parent.mkdir(parents=True, exist_ok=True)
+                best_combo_out.write_text(json.dumps({
+                    "strategy":       best.get("strategy"),
+                    "granularity":    int(best.get("granularity", 16)),
+                    "patches_per_drop": int(best.get("patches_per_drop", 10)),
+                    "dropout_rounds": int(best.get("dropout_rounds", 1)),
+                    "threshold":      float(best.get("threshold", 0.15)),
+                }, indent=2))
+                print(f"Best combo written to {best_combo_out}")
         writer.save_text("summary.txt", summary)
 
 
@@ -493,6 +518,28 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--macro-config", default="configs/macro_config.yaml")
+    p.add_argument("--dataset",     default=None,
+                   help="Override macro_sweep.dataset_name (voc, chest_xray).")
+    p.add_argument("--transformer", default=None,
+                   help="Override macro_sweep.transformer (blip, bridgetower).")
+    p.add_argument("--only-phase",
+                   choices=["baseline", "head-tuning", "patch-tuning", "final-eval"],
+                   default=None,
+                   help="Run only one phase. Omit to run all phases in order.")
+    p.add_argument("--output-phase-dir", default=None,
+                   help="Exact directory for this phase's outputs (no timestamp sub-dir).")
+    p.add_argument("--best-pipeline-out", default=None,
+                   help="Path to write best {layer,head} JSON (head-tuning phase).")
+    p.add_argument("--best-pipeline-in", default=None,
+                   help="Path to read best {layer,head} JSON (patch-tuning / final-eval).")
+    p.add_argument("--best-combo-out", default=None,
+                   help="Path to write best patch combo JSON (patch-tuning phase).")
+    p.add_argument("--best-combo-in", default=None,
+                   help="Path to read best patch combo JSON (final-eval phase).")
+    p.add_argument("--max-eval-samples", type=int, default=None,
+                   help="Override max_eval_samples for baseline and final-eval phases.")
+    p.add_argument("--max-tune-samples", type=int, default=None,
+                   help="Override max_tune_samples for head-tuning and patch-tuning phases.")
     return p.parse_args()
 
 
@@ -510,8 +557,16 @@ def main() -> None:
     if not macro:
         raise ValueError("macro_config.yaml must contain a 'macro_sweep' mapping.")
 
-    max_eval_samples = int(macro.get("max_eval_samples", 200))
-    max_tune_samples = int(macro.get("max_tune_samples", 30))
+    if args.dataset:
+        macro["dataset_name"] = args.dataset
+    if args.transformer:
+        macro["transformer"] = args.transformer
+
+    max_eval_samples = int(args.max_eval_samples or macro.get("max_eval_samples", 200))
+    max_tune_samples = int(args.max_tune_samples or macro.get("max_tune_samples", 30))
+
+    only = args.only_phase
+    output_phase_dir = Path(args.output_phase_dir) if args.output_phase_dir else None
 
     transfer_cfgs = [
         _resolve_transfer_config(p)
@@ -519,25 +574,47 @@ def main() -> None:
     ]
     base_tune_cfg = transfer_cfgs[0] if transfer_cfgs else (ROOT / "config_paper_baseline.yaml")
 
-    if transfer_cfgs:
-        _log_block("=== START: BASELINE TRANSFER SWEEP ===")
-        for cfg_path in transfer_cfgs:
-            print(_bold(f"Transfer config: {cfg_path.relative_to(ROOT)}"))
-            raw_cfg = load_config(cfg_path)
-            run_cfg = _apply_macro_overrides(raw_cfg, macro, sample_cap=max_eval_samples)
-            temp_cfg = _write_temp_config(run_cfg, prefix="macro_transfer_")
-            slug = f"transfer_{cfg_path.stem}_{run_cfg['dataset']['name']}"
-            _run_baseline_transfer(temp_cfg, slug, max_eval_samples=max_eval_samples)
-        _log_block("=== END: BASELINE TRANSFER SWEEP ===")
-
-    # best_pipeline carries {layer, head} discovered during head/layer tuning.
-    # Prefer the 'dice' result (directly relevant); fall back to 'clip' or last run.
+    # ── Resolve starting best_pipeline ───────────────────────────────────────
+    # Priority: --best-pipeline-in file > pinned_pipeline in config
     best_pipeline: dict[str, Any] | None = None
+    if args.best_pipeline_in:
+        bp_path = Path(args.best_pipeline_in)
+        if bp_path.exists():
+            try:
+                best_pipeline = json.loads(bp_path.read_text())
+                print(_bold(f"Loaded best pipeline from {bp_path}: L={best_pipeline.get('layer')} H={best_pipeline.get('head')}"))
+            except Exception as exc:
+                print(f"Warning: could not read {bp_path}: {exc}")
+    if best_pipeline is None:
+        pinned = macro.get("pinned_pipeline", {})
+        if pinned.get("layer") is not None and pinned.get("head") is not None:
+            best_pipeline = {"layer": int(pinned["layer"]), "head": int(pinned["head"])}
 
+    # ── Phase 1: Baseline ─────────────────────────────────────────────────────
+    if only is None or only == "baseline":
+        if transfer_cfgs:
+            _log_block("=== START: PHASE 1 — BASELINE TRANSFER SWEEP ===")
+            for cfg_path in transfer_cfgs:
+                print(_bold(f"Transfer config: {cfg_path.relative_to(ROOT)}"))
+                raw_cfg = load_config(cfg_path)
+                run_cfg = _apply_macro_overrides(raw_cfg, macro, sample_cap=max_eval_samples)
+                # Apply paper_pipeline defaults (L=8, H=10 for BLIP) for Phase 1
+                paper = macro.get("paper_pipeline", {})
+                if paper.get("layer") is not None and paper.get("head") is not None:
+                    run_cfg.setdefault("pipeline", {})["layer"] = int(paper["layer"])
+                    run_cfg["pipeline"]["head"] = int(paper["head"])
+                    print(_bold(f"Phase 1 paper defaults: L={paper['layer']}, H={paper['head']}"))
+                temp_cfg = _write_temp_config(run_cfg, prefix="macro_transfer_")
+                slug = f"transfer_{cfg_path.stem}_{run_cfg['dataset']['name']}"
+                _run_baseline_transfer(temp_cfg, slug, max_eval_samples, output_dir=output_phase_dir)
+            _log_block("=== END: PHASE 1 — BASELINE TRANSFER SWEEP ===")
+
+    # ── Phase 3: Head/Layer Tuning ────────────────────────────────────────────
     head_cfg = macro.get("head_layer_tuning", {})
-    if bool(head_cfg.get("run", False)):
-        _log_block("=== START: HEAD/LAYER TUNING SWEEP ===")
-        metrics = [str(m).strip().lower() for m in head_cfg.get("metrics", ["clip", "dice"])]
+    should_run_head = (only == "head-tuning") or (only is None and bool(head_cfg.get("run", False)))
+    if should_run_head:
+        _log_block("=== START: PHASE 3 — HEAD/LAYER TUNING ===")
+        metrics = [str(m).strip().lower() for m in head_cfg.get("metrics", ["dice"])]
         tuning_results: dict[str, dict[str, Any]] = {}
         for metric in metrics:
             if metric not in {"clip", "dice"}:
@@ -558,36 +635,41 @@ def main() -> None:
                 break
         if best_pipeline is None and tuning_results:
             best_pipeline = next(iter(tuning_results.values()))
-        _log_block("=== END: HEAD/LAYER TUNING SWEEP ===")
+        if args.best_pipeline_out and best_pipeline is not None:
+            out_path = Path(args.best_pipeline_out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(best_pipeline, indent=2))
+            print(_bold(f"Best pipeline saved → {out_path}  L={best_pipeline.get('layer')} H={best_pipeline.get('head')}"))
+        _log_block("=== END: PHASE 3 — HEAD/LAYER TUNING ===")
 
+    # ── Phase 2: Patch/DropOut Tuning ─────────────────────────────────────────
     patch_cfg = macro.get("patch_settings_tuning", {})
-    if bool(patch_cfg.get("run", False)):
-        _log_block("=== START: PATCH TUNING SWEEP ===")
-        regular_grid_sizes = [int(v) for v in patch_cfg.get("regular_grid_sizes", [21])]
-        superpixel_segments = [int(v) for v in patch_cfg.get("superpixel_segments", [256])]
+    should_run_patch = (only == "patch-tuning") or (only is None and bool(patch_cfg.get("run", False)))
+    if should_run_patch:
+        _log_block("=== START: PHASE 2 — PATCH/DROPOUT TUNING ===")
+        regular_grid_sizes  = [int(v) for v in patch_cfg.get("regular_grid_sizes", [16, 32])]
+        superpixel_segments = [int(v) for v in patch_cfg.get("superpixel_segments", [64, 128, 256])]
         patches_per_drop_range = [int(v) for v in patch_cfg.get("patches_per_drop_range", [10])]
-        dropout_iterations = [int(v) for v in patch_cfg.get("dropout_iterations_range", [1, 2, 3])]
-        threshold_range = [float(v) for v in patch_cfg.get("threshold_range", [0.15])]
+        dropout_iterations  = [int(v) for v in patch_cfg.get("dropout_iterations_range", [0, 1, 2, 3])]
+        threshold_range     = [float(v) for v in patch_cfg.get("threshold_range", [0.05, 0.1, 0.2])]
         if not dropout_iterations:
             raise ValueError("patch_settings_tuning.dropout_iterations_range cannot be empty.")
 
         raw_cfg = load_config(base_tune_cfg)
         run_cfg = _apply_macro_overrides(raw_cfg, macro, sample_cap=max_tune_samples)
 
-        # Pin the optimal layer/head discovered in the head/layer tuning stage.
         if best_pipeline is not None:
             best_L = int(best_pipeline["layer"])
             best_H = int(best_pipeline["head"])
             run_cfg.setdefault("pipeline", {})["layer"] = best_L
             run_cfg["pipeline"]["head"] = best_H
-            print(_bold(f"STARTING PATCH SWEEP WITH PINNED HYPERPARAMS: L={best_L}, H={best_H}"))
+            print(_bold(f"Phase 2 pinned: L={best_L}, H={best_H}"))
         else:
-            print(_bold("STARTING PATCH SWEEP WITH DEFAULT HYPERPARAMS (no tuning result available)"))
+            print(_bold("Phase 2: no L/H from Phase 3 — using config defaults"))
 
-        run_cfg.setdefault("tune_pipeline", {})
-        run_cfg["tune_pipeline"]["max_images"] = max_tune_samples
-
+        run_cfg.setdefault("tune_pipeline", {})["max_images"] = max_tune_samples
         temp_cfg = _write_temp_config(run_cfg, prefix="macro_patch_")
+        best_combo_out = Path(args.best_combo_out) if args.best_combo_out else None
         _run_patch_tuning(
             config_path=temp_cfg,
             regular_grid_sizes=regular_grid_sizes,
@@ -596,8 +678,52 @@ def main() -> None:
             dropout_iterations=dropout_iterations,
             threshold_range=threshold_range,
             max_tune_samples=max_tune_samples,
+            output_dir=output_phase_dir,
+            best_combo_out=best_combo_out,
         )
-        _log_block("=== END: PATCH TUNING SWEEP ===")
+        _log_block("=== END: PHASE 2 — PATCH/DROPOUT TUNING ===")
+
+    # ── Phase 4: Final Evaluation ─────────────────────────────────────────────
+    if only is None or only == "final-eval":
+        _log_block("=== START: PHASE 4 — FINAL EVALUATION ===")
+        best_combo: dict[str, Any] | None = None
+        if args.best_combo_in:
+            bc_path = Path(args.best_combo_in)
+            if bc_path.exists():
+                try:
+                    best_combo = json.loads(bc_path.read_text())
+                    print(_bold(f"Loaded best combo: {best_combo}"))
+                except Exception as exc:
+                    print(f"Warning: could not read {bc_path}: {exc}")
+
+        raw_cfg = load_config(base_tune_cfg)
+        run_cfg = _apply_macro_overrides(raw_cfg, macro, sample_cap=max_eval_samples)
+
+        if best_pipeline is not None:
+            run_cfg.setdefault("pipeline", {})["layer"] = int(best_pipeline["layer"])
+            run_cfg["pipeline"]["head"] = int(best_pipeline["head"])
+            print(_bold(f"Phase 4 pipeline: L={best_pipeline['layer']}, H={best_pipeline['head']}"))
+
+        if best_combo is not None:
+            strategy = best_combo.get("strategy", "regular")
+            gran     = int(best_combo.get("granularity", 16))
+            ppd      = int(best_combo.get("patches_per_drop", 10))
+            dr       = int(best_combo.get("dropout_rounds", 1))
+            thr      = float(best_combo.get("threshold", 0.15))
+            run_cfg.setdefault("pipeline", {})["dropout_rounds"]  = dr
+            run_cfg["pipeline"]["patches_per_drop"] = ppd
+            run_cfg.setdefault("postprocess", {})["threshold"] = thr
+            if strategy == "regular":
+                run_cfg.setdefault("patching", {})["type"] = "regular_free"
+                run_cfg["patching"].setdefault("regular_free", {})["grid_size"] = gran
+            else:
+                run_cfg.setdefault("patching", {})["type"] = "superpixel"
+                run_cfg["patching"].setdefault("superpixel", {})["n_segments"] = gran
+
+        temp_cfg = _write_temp_config(run_cfg, prefix="macro_final_eval_")
+        slug = f"final_eval_{run_cfg['dataset']['name']}"
+        _run_baseline_transfer(temp_cfg, slug, max_eval_samples, output_dir=output_phase_dir)
+        _log_block("=== END: PHASE 4 — FINAL EVALUATION ===")
 
     _log_block("=== MACRO SWEEP COMPLETE ===")
 

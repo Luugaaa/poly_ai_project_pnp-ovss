@@ -207,12 +207,16 @@ class ReportWriter:
         cfg: dict,
         dataset_name: str = "",
         transformer_name: str = "",
+        run_dir: Optional[Path] = None,
     ) -> None:
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe_slug = slug.replace("/", "_").replace(" ", "_")
-        ds = (dataset_name.strip().lower() or str(cfg.get("dataset", {}).get("name", "unknown"))).lower()
-        tr = transformer_name.strip().lower() or _infer_transformer(cfg)
-        self.run_dir = root_dir / ds / tr / f"run_{ts}_{safe_slug}"
+        if run_dir is not None:
+            self.run_dir = run_dir
+        else:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            safe_slug = slug.replace("/", "_").replace(" ", "_")
+            ds = (dataset_name.strip().lower() or str(cfg.get("dataset", {}).get("name", "unknown"))).lower()
+            tr = transformer_name.strip().lower() or _infer_transformer(cfg)
+            self.run_dir = root_dir / ds / tr / f"run_{ts}_{safe_slug}"
         self.run_dir.mkdir(parents=True, exist_ok=True)
 
         self.cfg = cfg
@@ -268,6 +272,7 @@ class ExperimentRunner:
         slug: str,
         output_root: str = "outputs",
         dataset_override: Optional[dict] = None,
+        run_dir_override: Optional[Path] = None,
     ) -> None:
         self.root = root
         self.config_path = config_path
@@ -275,6 +280,7 @@ class ExperimentRunner:
         self.slug = slug
         self.output_root = output_root
         self.dataset_override = dataset_override or {}
+        self.run_dir_override = run_dir_override
 
         self.writer: Optional[ReportWriter] = None
         self.dataset = None
@@ -290,6 +296,7 @@ class ExperimentRunner:
             self.cfg,
             dataset_name=ds_name,
             transformer_name=tr_name,
+            run_dir=self.run_dir_override,
         )
         self.writer.save_config()
 
@@ -305,3 +312,10 @@ class ExperimentRunner:
     def __exit__(self, exc_type, exc, tb) -> None:
         if self.writer is not None:
             self.writer.close()
+        # Explicitly release the BLIP model from GPU memory so the next phase
+        # (or a subprocess) doesn't load a second copy alongside this one.
+        if self.inference_engine is not None:
+            del self.inference_engine.wrapper
+            self.inference_engine = None
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()

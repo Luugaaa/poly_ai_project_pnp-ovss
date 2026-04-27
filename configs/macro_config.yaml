@@ -1,18 +1,31 @@
 macro_sweep:
-  dataset_name: "chest_xray" # Toggle to "voc" for natural images
-  transformer: "blip" # or "bridgetower"
+  dataset_name: "chest_xray"
+  transformer: "blip"
   target_resolution: 336
   max_eval_samples: 200
   max_tune_samples: 30
+
+  # Phase 1 paper defaults (PnP-OVSS original BLIP-ITM-large settings).
+  paper_pipeline:
+    layer: 8
+    head: 10
+
+  # Fallback when head_layer_tuning is skipped (--only-phase patch-tuning without prior Phase 3).
+  pinned_pipeline:
+    layer: 9
+    head: 3
+
   transfer_configs:
     - "configs/config_paper_baseline.yaml"
+
   head_layer_tuning:
     run: true
-    metrics: ["clip", "dice"]
+    metrics: ["dice"]
+
   patch_settings_tuning:
     run: true
-    regular_grid_sizes: [16, 24, 32]      # G×G pixel-space grid dimensions
-    superpixel_segments: [64, 128, 256]   # N target segments for SLIC
-    patches_per_drop_range: [5, 10, 20]   # patches removed per dropout round
-    dropout_iterations_range: [0, 1, 2, 3] # 0 = baseline (no dropout)
-    threshold_range: [0.05, 0.1, 0.2]    # binarisation thresholds
+    regular_grid_sizes: [16, 32]
+    superpixel_segments: [64, 128, 256]
+    # patches_per_drop_range: [5, 10]  # deferred — adds 2× combos
+    dropout_iterations_range: [0, 1, 2, 3]   # 0 = no dropout (baseline control)
+    threshold_range: [0.05, 0.1, 0.2]

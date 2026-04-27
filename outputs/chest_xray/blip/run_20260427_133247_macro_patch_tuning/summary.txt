@@ -1,0 +1,8 @@
+total_rows: 54
+successful_rows: 40
+best_strategy: regular
+best_granularity: 16
+best_dropout_rounds: 1
+best_threshold: 0.2
+best_miou: 0.6805
+best_mdice: 0.808
